@@ -1,6 +1,6 @@
 """Regression tests for the A-share continuous-auction and IPO/ST rules."""
 
-from datetime import date, time
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 import unittest
 
@@ -27,6 +27,49 @@ class AShareRuleTests(unittest.TestCase):
         for at, expected in checks.items():
             with self.subTest(at=at):
                 self.assertEqual(is_continuous_auction_time(at), expected)
+
+    def test_naive_beijing_datetime_is_treated_as_local_clock(self):
+        """Market-data timestamps have no timezone and are already Beijing time."""
+        rule = make_a_share_security_rule(
+            "000001.SZ", date(2026, 10, 15), AShareBoard.MAIN
+        )
+        for clock, expected in (
+            (datetime(2026, 10, 15, 9, 40), True),
+            (datetime(2026, 10, 15, 1, 40), False),
+            (datetime(2026, 10, 15, 12, 0), False),
+            (datetime(2026, 10, 15, 14, 57), False),
+        ):
+            with self.subTest(clock=clock):
+                self.assertEqual(is_continuous_auction_time(clock), expected)
+                self.assertEqual(is_a_share_rule_trading_time(rule, clock), expected)
+
+    def test_timezone_aware_inputs_fail_in_both_time_checks(self):
+        """Do not silently interpret UTC timestamps as Beijing wall-clock time."""
+        rule = make_a_share_security_rule(
+            "000001.SZ", date(2026, 10, 15), AShareBoard.MAIN
+        )
+        tz_beijing = timezone(timedelta(hours=8))
+        aware_values = (
+            datetime(2026, 10, 15, 1, 40, tzinfo=timezone.utc),
+            datetime(2026, 10, 15, 9, 40, tzinfo=tz_beijing),
+            time(9, 40, tzinfo=timezone.utc),
+            time(9, 40, tzinfo=tz_beijing),
+        )
+        for value in aware_values:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(ValueError, "timezone-naive"):
+                    is_continuous_auction_time(value)
+                with self.assertRaisesRegex(ValueError, "timezone-naive"):
+                    is_a_share_rule_trading_time(rule, value)
+
+    def test_invalid_clock_type_is_rejected(self):
+        with self.assertRaises(TypeError):
+            is_continuous_auction_time("09:40")
+        rule = make_a_share_security_rule(
+            "000001.SZ", date(2026, 10, 15), AShareBoard.MAIN
+        )
+        with self.assertRaises(TypeError):
+            is_a_share_rule_trading_time(rule, "09:40")
 
     def test_board_rates_and_st_effective_date(self):
         before = date(2026, 7, 3)
