@@ -53,6 +53,49 @@ class AShareRuleTests(unittest.TestCase):
             Decimal("0.10"),
         )
 
+    def test_main_st_boundary_never_leaks_future_rate(self):
+        """Historic main-board ST snapshots must resolve to the date's version."""
+        old = Decimal("0.05")
+        new = Decimal("0.10")
+        for on, expected in (
+            (date(2026, 7, 3), old),   # last trading day before rule change
+            (date(2026, 7, 5), old),   # last calendar day before change
+            (date(2026, 7, 6), new),   # first trading day under new rule
+            (date(2026, 7, 7), new),
+        ):
+            with self.subTest(on=on):
+                self.assertEqual(
+                    a_share_price_limit_rate(AShareBoard.MAIN, on, is_st=True),
+                    expected,
+                )
+                self.assertEqual(
+                    a_share_price_limit_rate(AShareBoard.MAIN, on, is_st=False),
+                    Decimal("0.10"),
+                )
+                rule = make_a_share_security_rule(
+                    "600000.SH", on, AShareBoard.MAIN, is_st=True
+                )
+                self.assertEqual(rule.limit_up_rate, expected)
+                self.assertEqual(rule.limit_down_rate, expected)
+                self.assertEqual(rule.effective_from, on)
+                self.assertEqual(rule.effective_to, on)
+
+        old_rule = make_a_share_security_rule(
+            "600000.SH", date(2026, 7, 3), AShareBoard.MAIN, is_st=True
+        )
+        new_rule = make_a_share_security_rule(
+            "600000.SH", date(2026, 7, 6), AShareBoard.MAIN, is_st=True
+        )
+        repo = InMemoryRuleRepository(security_rules=[old_rule, new_rule])
+        self.assertEqual(
+            repo.get_security_rule("600000.SH", date(2026, 7, 3)).limit_up_rate,
+            old,
+        )
+        self.assertEqual(
+            repo.get_security_rule("600000.SH", date(2026, 7, 6)).limit_up_rate,
+            new,
+        )
+
     def test_ipo_exempt_days_are_trading_day_ordinals(self):
         on = date(2026, 10, 15)
         for board in (AShareBoard.MAIN, AShareBoard.CHINEXT, AShareBoard.STAR):
