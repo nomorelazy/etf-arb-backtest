@@ -8,8 +8,10 @@ from typing import Protocol
 from etf_arb.domain import Quote, QuoteStatus
 from etf_arb.rules.a_share import (
     CONTINUOUS_AUCTION_SESSIONS,
+    is_a_share_rule_trading_time,
     is_continuous_auction_time,
 )
+from etf_arb.rules.models import RuleRepository
 
 from etf_arb.execution.models import (
     ExecutionResult,
@@ -35,7 +37,13 @@ class NextQuoteFillModel:
     missing side of the book. Only quotes at or before order submission are
     eligible. Because :class:`Quote` does not carry displayed bid/ask
     quantities, a usable quote fills the entire order quantity.
+
+    When a security-rule repository is supplied, day-specific suspension,
+    delisting expiry, and direction restrictions are enforced before filling.
     """
+
+    def __init__(self, *, security_rules: RuleRepository | None = None) -> None:
+        self._security_rules = security_rules
 
     def execute(self, order: Order, market_data: tuple[Quote, ...]) -> ExecutionResult:
         # Buy/sell orders can only execute during A-share continuous auction.
@@ -46,6 +54,23 @@ class NextQuoteFillModel:
                 status=ExecutionStatus.NO_FILL,
                 reason="Order submitted outside continuous-auction trading hours.",
             )
+
+        if self._security_rules is not None:
+            rule = self._security_rules.get_security_rule(
+                order.security_code, order.submitted_at.date()
+            )
+            allowed = (
+                is_a_share_rule_trading_time(rule, order.submitted_at)
+                and (
+                    rule.can_buy() if order.side is OrderSide.BUY else rule.can_sell()
+                )
+            )
+            if not allowed:
+                return ExecutionResult(
+                    order=order,
+                    status=ExecutionStatus.REJECTED,
+                    reason="Security trading rule prohibits this order (suspended or not tradable).",
+                )
 
         # Never fill an afternoon order using a quote from the morning,
         # a previous day, or outside the same continuous-auction session.
@@ -67,6 +92,15 @@ class NextQuoteFillModel:
             key=lambda quote: quote.ts,
             reverse=True,
         )
+        # An explicit suspension quote dominates older normal quotes.
+        # Never "rewind" to a tradable quote when the latest snapshot is halted.
+        if candidates and candidates[0].status is QuoteStatus.SUSPENDED:
+            return ExecutionResult(
+                order=order,
+                status=ExecutionStatus.NO_FILL,
+                reason="Latest quote indicates trading suspension.",
+            )
+
         for quote in candidates:
             if quote.status not in (
                 QuoteStatus.NORMAL,
