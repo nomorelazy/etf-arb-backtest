@@ -135,6 +135,50 @@ etf_arb/
 
 金额和价格使用 `Decimal`。导入数据时请从原始字符串构造 `Decimal`，避免先经过二进制浮点数。
 
+## A 股 ST、退市整理期和停牌规则
+
+在 `etf_arb/rules/a_share.py` 中，A 股每日规则使用三个明确的布尔标志：
+
+- `is_st=True`：ST 或 *ST 风险警示股票（两者共用标志；应使用该交易日真实证券状态）。
+- `is_delisting_period=True`：处于退市整理期（不是“已摘牌”）。
+- `is_suspended=True`：股票当日全天停牌，不得买卖。
+
+退市整理期第 1 个**实际可交易日**无涨跌幅限制；第 2—15 个实际可交易日恢复对应板块涨跌幅：主板 ±10%、创业板/科创板 ±20%、北交所 ±30%。退市整理规则优先于 ST 的历史涨跌幅限制。第 15 个实际可交易日之后不允许按退市整理期继续交易。停牌日不计入 15 天；现行交易所规则规定，退市整理期内全天停牌累计不得超过 5 个交易日。
+
+使用 **交易所交易日序列** 计算序号，不使用自然日差值，也不根据分钟行情缺失推断停牌：
+
+```python
+from datetime import date
+from etf_arb.rules import (
+    AShareBoard, delisting_trading_day_index, make_a_share_security_rule,
+)
+
+# 示例日历必须从退市整理期首个交易所交易日开始连续给出，
+# 包括当中已知的全天停牌日，不包括休市日。
+exchange_days = [
+    date(2026, 10, 15),
+    date(2026, 10, 16),
+    date(2026, 10, 19),
+    date(2026, 10, 20),
+]
+suspended_days = [date(2026, 10, 16)]
+day = date(2026, 10, 19)
+ordinal = delisting_trading_day_index(
+    day, exchange_days, suspended_days=suspended_days
+)  # 2，10 月 16 日停牌未计数
+rule = make_a_share_security_rule(
+    "600001.SH", day, AShareBoard.MAIN,
+    is_st=True, is_delisting_period=True,
+    delisting_trading_day=ordinal, is_suspended=False,
+)
+assert rule.limit_up_rate == rule.limit_down_rate
+assert rule.can_buy() and rule.can_sell()
+```
+
+若查询的日期本身全天停牌，`delisting_trading_day_index` 返回 `None`，建立规则时传 `is_suspended=True, is_delisting_period=True`，并**不传交易日序号**，买卖都会禁用。当天复牌后继续递增之前的有效交易日序号。序号为 16 或以上时，规则自动禁用买卖。普通主板 ST 的历史规则仍为 2026-07-06 之前 ±5%、当日起 ±10%。
+
+对实际订单执行 `NextQuoteFillModel(security_rules=InMemoryRuleRepository(...))`，撮合会读取当日股票规则，拦截停牌、已结束退市整理期以及被禁止的买卖方向。未注入规则仓库的旧式撮合仅能依赖行情快照中的停牌标志，不能根据证券主数据识别当天停牌；完整回测应注入规则仓库。
+
 ## 尚未实现
 
 1. 将分钟收盘数据仓库接入事件驱动回测，并补充除 close 外的盘口/成交量数据适配器。
