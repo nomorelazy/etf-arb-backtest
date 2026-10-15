@@ -66,6 +66,7 @@ class PCFParserTests(unittest.TestCase):
         self.assertEqual(pcf.etf_code, "159338")
         self.assertEqual(pcf.exchange, "SZ")
         self.assertEqual(pcf.effective_date, date(2024, 10, 15))
+        self.assertEqual(pcf.pre_trading_day, date(2024, 10, 14))
         self.assertEqual(pcf.creation_unit, 3000000)
         self.assertEqual(pcf.estimated_cash_component, Decimal("-8575.19"))
         self.assertEqual(pcf.components[0].security_code, "159900")
@@ -117,6 +118,30 @@ class PCFParserTests(unittest.TestCase):
         self.assertEqual(pcf.pre_cash_component, Decimal("-2"))
         self.assertEqual(pcf.max_cash_ratio, Decimal("0.5"))
         self.assertEqual(pcf.publish_flag, "Yes")
+
+    def test_xml_dates_must_be_exact_yyyymmdd(self) -> None:
+        """TradingDay and PreTradingDay are parsed, not computed or truncated."""
+        with TemporaryDirectory() as temp:
+            path = Path(temp) / "20241015.xml"
+            path.write_text(SZ_XML, encoding="utf-8")
+            pcf = parse_pcf_xml(path)
+            self.assertEqual(pcf.effective_date, date(2024, 10, 15))
+            self.assertEqual(pcf.pre_trading_day, date(2024, 10, 14))
+
+            for field, value in (
+                ("TradingDay", "20241015extra"),
+                ("TradingDay", "20241315"),
+                ("PreTradingDay", "20241014+08:00"),
+                ("PreTradingDay", "20240230"),
+            ):
+                with self.subTest(field=field, value=value):
+                    altered = SZ_XML.replace(
+                        f"<{field}>" + ("20241015" if field == "TradingDay" else "20241014") + f"</{field}>",
+                        f"<{field}>{value}</{field}>",
+                    )
+                    path.write_text(altered, encoding="utf-8")
+                    with self.assertRaises(PCFParseError):
+                        parse_pcf_xml(path)
 
     def test_repository_requires_exact_date_and_skips_status_file(self) -> None:
         with TemporaryDirectory() as temp:
