@@ -47,7 +47,7 @@ class ExecutionAndRulesTests(unittest.TestCase):
         self.assertEqual(result.fills[0].ts, latest_quote.ts)
 
     def test_sell_uses_best_bid_without_extra_slippage_and_missing_quote_is_no_fill(self) -> None:
-        submitted = datetime(2025, 1, 2, 9, 30)
+        submitted = datetime(2025, 1, 2, 9, 31)
         order = Order("o-2", "159338", OrderSide.SELL, 100, submitted)
         result = NextQuoteFillModel().execute(
             order,
@@ -85,6 +85,66 @@ class ExecutionAndRulesTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.status, ExecutionStatus.NO_FILL)
+
+    def test_only_continuous_auction_orders_can_fill(self):
+        day = (2025, 1, 2)
+        model = NextQuoteFillModel()
+        quotes = (
+            Quote(
+                "159338", datetime(*day, 9, 40),
+                ask=Decimal("1.01"), status=QuoteStatus.NORMAL,
+            ),
+            Quote(
+                "159338", datetime(*day, 13, 10),
+                ask=Decimal("1.02"), status=QuoteStatus.NORMAL,
+            ),
+        )
+        for hour, minute in (
+            (9, 29), (11, 30), (12, 0), (12, 59),
+            (14, 57), (15, 0),
+        ):
+            with self.subTest(at=(hour, minute)):
+                order = Order(
+                    "o-out", "159338", OrderSide.BUY, 100,
+                    datetime(*day, hour, minute),
+                )
+                result = model.execute(order, quotes)
+                self.assertEqual(result.status, ExecutionStatus.NO_FILL)
+                self.assertFalse(result.fills)
+
+        morning = Order(
+            "o-am", "159338", OrderSide.BUY, 100, datetime(*day, 9, 40)
+        )
+        afternoon = Order(
+            "o-pm", "159338", OrderSide.BUY, 100, datetime(*day, 13, 10)
+        )
+        self.assertEqual(
+            model.execute(morning, quotes).fills[0].price, Decimal("1.01")
+        )
+        self.assertEqual(
+            model.execute(afternoon, quotes).fills[0].price, Decimal("1.02")
+        )
+
+    def test_afternoon_order_cannot_use_morning_or_lunch_quote(self):
+        day = (2025, 1, 2)
+        order = Order(
+            "o-pm", "159338", OrderSide.BUY, 100, datetime(*day, 13, 0)
+        )
+        result = NextQuoteFillModel().execute(
+            order,
+            (
+                Quote(
+                    "159338", datetime(*day, 11, 29),
+                    ask=Decimal("1.01"), status=QuoteStatus.NORMAL,
+                ),
+                Quote(
+                    "159338", datetime(*day, 12, 0),
+                    ask=Decimal("1.02"), status=QuoteStatus.NORMAL,
+                ),
+            ),
+        )
+        self.assertEqual(result.status, ExecutionStatus.NO_FILL)
+        self.assertFalse(result.fills)
 
     def test_historical_repository_selects_date_and_rejects_overlap(self) -> None:
         first = ETFRule(
