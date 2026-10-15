@@ -127,12 +127,32 @@ class SecurityTradingRule:
     transfer_fee_rate: Decimal | None = None
     trading_start: time | None = None
     trading_end: time | None = None
+    # Point-in-time flags. ST includes both ST and *ST.
+    is_st: bool = False
+    is_delisting_period: bool = False
+    is_suspended: bool = False
+    delisting_trading_day: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(
             self, "security_code", _normalize_code(self.security_code, "security_code")
         )
         _check_period(self.effective_from, self.effective_to)
+        for name in ("is_st", "is_delisting_period", "is_suspended"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a bool")
+        ordinal = self.delisting_trading_day
+        if ordinal is not None and (type(ordinal) is not int or ordinal < 1):
+            raise ValueError("delisting_trading_day must be a positive integer")
+        if not self.is_delisting_period and ordinal is not None:
+            raise ValueError("delisting_trading_day requires is_delisting_period")
+        if self.is_delisting_period and self.is_suspended and ordinal is not None:
+            raise ValueError("Suspended days cannot have a delisting trading-day ordinal")
+        if self.is_delisting_period and not self.is_suspended and ordinal is None:
+            raise ValueError("Active delisting periods require a trading-day ordinal")
+        if self.is_delisting_period and ordinal is not None and ordinal > 15:
+            if self.buy_enabled or self.sell_enabled:
+                raise ValueError("Delisting-period day 16+ cannot permit trading")
         if self.lot_size is not None and self.lot_size <= 0:
             raise ValueError("lot_size must be positive when provided.")
         decimal_fields = (
@@ -162,13 +182,18 @@ class SecurityTradingRule:
         )
 
     def can_buy(self) -> bool:
-        return self.buy_enabled
+        return self.buy_enabled and not self.is_suspended
 
     def can_sell(self) -> bool:
-        return self.sell_enabled
+        return self.sell_enabled and not self.is_suspended
 
     def is_trading_time(self, at: time) -> bool:
-        return not (
+        # A full-day suspension or expired delisting period is not tradable.
+        return not self.is_suspended and not (
+            self.is_delisting_period
+            and self.delisting_trading_day is not None
+            and self.delisting_trading_day > 15
+        ) and not (
             (self.trading_start is not None and at < self.trading_start)
             or (self.trading_end is not None and at > self.trading_end)
         )
