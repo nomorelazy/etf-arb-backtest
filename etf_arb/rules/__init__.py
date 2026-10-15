@@ -1,5 +1,14 @@
 """ETF application and underlying-security trading rules."""
 
+from etf_arb.rules.a_share import (
+    AShareBoard,
+    CONTINUOUS_AUCTION_SESSIONS,
+    MAIN_ST_TEN_PERCENT_FROM,
+    a_share_price_limit_rate,
+    is_a_share_rule_trading_time,
+    is_continuous_auction_time,
+    make_a_share_security_rule,
+)
 from etf_arb.rules.errors import RuleError, RuleNotFoundError, RuleOverlapError
 from etf_arb.rules.models import ETFRule, RuleRepository, SecurityTradingRule
 from etf_arb.rules.repository import (
@@ -9,6 +18,13 @@ from etf_arb.rules.repository import (
 )
 
 __all__ = [
+    "AShareBoard",
+    "CONTINUOUS_AUCTION_SESSIONS",
+    "MAIN_ST_TEN_PERCENT_FROM",
+    "a_share_price_limit_rate",
+    "is_a_share_rule_trading_time",
+    "is_continuous_auction_time",
+    "make_a_share_security_rule",
     "ETFRule",
     "HistoricalRuleRepository",
     "InMemoryRuleRepository",
