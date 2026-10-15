@@ -44,17 +44,29 @@ _BOARD_RATE = {
 }
 
 
+def _beijing_naive_clock(at: time | datetime) -> time:
+    """Accept only timezone-naive Beijing wall-clock values from market data.
+
+    Aware values must fail before datetime.time() discards tzinfo. Do not
+    implicitly convert to Beijing time or silently strip a timezone.
+    """
+    if not isinstance(at, (datetime, time)):
+        raise TypeError("at must be a time or datetime")
+    if at.tzinfo is not None:
+        raise ValueError(
+            "at must be timezone-naive Beijing local time; "
+            "timezone-aware time/datetime is not supported"
+        )
+    return at.time() if isinstance(at, datetime) else at
+
+
 def is_continuous_auction_time(at: time | datetime) -> bool:
-    """Check local China-exchange wall-clock time; trading calendar is separate.
+    """Check naive Beijing-local clock time; trading calendar is separate.
 
     Intervals are half-open: 11:30 and 14:57 are excluded. This is an
     execution/signal window, not a minute-bar timestamp convention.
     """
-    clock = at.timetz().replace(tzinfo=None) if isinstance(at, datetime) else at
-    if not isinstance(clock, time):
-        raise TypeError("at must be a time or datetime")
-    if clock.tzinfo is not None:
-        raise ValueError("Use exchange-local naive time (Asia/Shanghai)")
+    clock = _beijing_naive_clock(at)
     return any(start <= clock < end for start, end in CONTINUOUS_AUCTION_SESSIONS)
 
 
@@ -123,9 +135,9 @@ def make_a_share_security_rule(
 
 
 def is_a_share_rule_trading_time(rule: SecurityTradingRule, at: time | datetime) -> bool:
-    """Respect the security's broad window AND the actual two sessions."""
-    clock = at.timetz().replace(tzinfo=None) if isinstance(at, datetime) else at
-    return is_continuous_auction_time(at) and rule.is_trading_time(clock)
+    """Respect the two sessions; reject timezone-aware timestamps."""
+    clock = _beijing_naive_clock(at)
+    return is_continuous_auction_time(clock) and rule.is_trading_time(clock)
 
 
 __all__ = [
