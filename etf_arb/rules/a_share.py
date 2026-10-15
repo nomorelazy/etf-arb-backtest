@@ -27,6 +27,15 @@ CONTINUOUS_AUCTION_SESSIONS: tuple[tuple[time, time], ...] = (
     (time(13, 0), time(14, 57)),
 )
 MAIN_ST_TEN_PERCENT_FROM = date(2026, 7, 6)
+
+# 沪深主板 ST/*ST：历史回测必须按交易日选择生效版本。
+# 2026-07-06（含）之前的旧版本止于 2026-07-05；当天起执行 ±10%。
+# 适用于普通交易日；IPO 无涨跌幅限制的交易日优先豁免。
+MAIN_ST_PRICE_LIMIT_HISTORY: tuple[tuple[date, Decimal], ...] = (
+    (date.min, Decimal("0.05")),
+    (MAIN_ST_TEN_PERCENT_FROM, Decimal("0.10")),
+)
+
 _BOARD_RATE = {
     AShareBoard.MAIN: Decimal("0.10"),
     AShareBoard.CHINEXT: Decimal("0.20"),
@@ -73,8 +82,14 @@ def a_share_price_limit_rate(
         exempt_days = 1 if resolved_board is AShareBoard.BSE else 5
         if ipo_trading_day <= exempt_days:
             return None
-    if resolved_board is AShareBoard.MAIN and is_st and on < MAIN_ST_TEN_PERCENT_FROM:
-        return Decimal("0.05")
+    if resolved_board is AShareBoard.MAIN and is_st:
+        # Resolve the last effective version <= the requested backtest date.
+        # Never apply the current rule to a historical date.
+        return next(
+            rate
+            for effective_from, rate in reversed(MAIN_ST_PRICE_LIMIT_HISTORY)
+            if on >= effective_from
+        )
     return _BOARD_RATE[resolved_board]
 
 
@@ -115,7 +130,8 @@ def is_a_share_rule_trading_time(rule: SecurityTradingRule, at: time | datetime)
 
 __all__ = [
     "AShareBoard", "CONTINUOUS_AUCTION_SESSIONS",
-    "MAIN_ST_TEN_PERCENT_FROM", "a_share_price_limit_rate",
+    "MAIN_ST_TEN_PERCENT_FROM", "MAIN_ST_PRICE_LIMIT_HISTORY",
+    "a_share_price_limit_rate",
     "is_a_share_rule_trading_time", "is_continuous_auction_time",
     "make_a_share_security_rule",
 ]
