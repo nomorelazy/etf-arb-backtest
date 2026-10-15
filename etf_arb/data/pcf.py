@@ -100,7 +100,9 @@ def _date(value: object, *, field: str, required: bool = False) -> date | None:
     text = _text(value, field=field, required=required)
     if text is None:
         return None
-    match = _DATE_RE.fullmatch(text[:8])
+    # TradingDay / PreTradingDay are exactly eight ASCII digits: YYYYMMDD.
+    # Never silently truncate a malformed longer value.
+    match = _DATE_RE.fullmatch(text)
     if not match:
         raise PCFParseError(f"Expected YYYYMMDD date in {field}: {value!r}")
     try:
