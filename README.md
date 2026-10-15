@@ -53,6 +53,8 @@ pcf = pcf_repo.get("159338", date(2024, 10, 15))
 print(pcf.creation_unit, len(pcf.components))
 ```
 
+PCF 的 `<TradingDay>20241015</TradingDay>` 解析为交易日 `date(2024, 10, 15)`，`<PreTradingDay>20241014</PreTradingDay>` 解析为前一交易日 `date(2024, 10, 14)`；均要求严格的 `YYYYMMDD` 格式，不以自然日减一推断前一交易日。
+
 数量、价格、比例和现金字段都以 `Decimal` 保留。现金占位行会保留用于核对，但不应作为股票行情读取；上交所 XML 的成分股代码取 `InstrumentID`，`UnderlyingSecurityID` 保留作市场代码。不同来源的估算、实际和前日现金字段各自保留，解析阶段不会将它们猜测成统一的申购/赎回现金调整。原始清单是审计源，解析对象在内存中使用。
 
 ## 分钟收盘行情读取与目录索引
@@ -84,6 +86,28 @@ bars = minute_data.get_closes(
     end=datetime(2025, 1, 2, 10, 0),
 )
 ```
+
+行情字段 `time` 为 Parquet `timestamp[us]`（无时区），数值本身即为北京时间；读取和查询不进行 UTC / 上海时区转换。查询参数 `start`、`end`、`get_at_or_before` 的时间同样要求传入无时区的北京时间。
+
+如果只需要参与 A 股连续竞价的分钟行情，可在读取时指定：
+
+```python
+from datetime import date, datetime
+from etf_arb.data import ParquetMinuteCloseRepository
+from etf_arb.rules import is_continuous_auction_time
+
+repo = ParquetMinuteCloseRepository(r"C:\\data\\ifind_minute_close")
+bars = repo.get_closes(
+    "000001.SZ",
+    start=datetime(2024, 10, 15, 9, 30),
+    end=datetime(2024, 10, 15, 14, 57),
+    continuous_auction_only=True,
+)
+# 仅保留 09:30 <= time < 11:30 或 13:00 <= time < 14:57
+# 午休、开盘前、14:57 起的收盘集合竞价均不参与撮合。
+```
+
+`get_closes()` 默认仍返回全部原始分钟行情，用于审计、数据检查；传入 `continuous_auction_only=True` 才过滤时段。订单撮合接口也会拒绝在连续竞价时间外下单，且不会跨午休使用上午旧报价。
 
 查询以 `(time, thscode)` 为键。重叠文件中相同键、相同 close 会折叠为一条并保留来源文件；close 不同会抛出冲突错误，不会静默挑选。源时间无时区，按上海本地时间处理；行情价格读取为 `Decimal`。扫描时会检查必要列、类型、空值、非正数和非有限 close。SQLite 索引文件已加入 `.gitignore`。
 
