@@ -98,7 +98,54 @@ class MinuteCloseRepositoryTests(unittest.TestCase):
             with self.assertRaises(MinuteCloseConflictError):
                 repository.get_closes("159338.SZ")
 
-    def test_get_at_or_before_honors_timestamp_and_timezone(self) -> None:
+    def test_timestamp_us_bars_are_filtered_after_loading_to_auction_sessions(self):
+        day = (2025, 1, 2)
+        values = (
+            (datetime(*day, 9, 29, 59), 1.00),
+            (datetime(*day, 9, 30), 1.01),
+            (datetime(*day, 11, 29, 59, 999999), 1.02),
+            (datetime(*day, 11, 30), 1.03),
+            (datetime(*day, 12, 0), 1.04),
+            (datetime(*day, 12, 59, 59), 1.05),
+            (datetime(*day, 13, 0), 1.06),
+            (datetime(*day, 14, 56, 59, 999999), 1.07),
+            (datetime(*day, 14, 57), 1.08),
+        )
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            path = root / "2025-01" / "etf.parquet"
+            write_parquet(path, [(at, "159338.SZ", price) for at, price in values])
+            self.assertEqual(pq.read_schema(path).field("time").type, pa.timestamp("us"))
+            repo = ParquetMinuteCloseRepository(root, catalog_path=root / "catalog.sqlite3")
+            raw = repo.get_closes("159338.SZ")
+            tradable = repo.get_closes("159338.SZ", continuous_auction_only=True)
+        self.assertEqual([b.time for b in raw], [at for at, _ in values])
+        self.assertEqual(
+            [b.time for b in tradable],
+            [values[i][0] for i in (1, 2, 6, 7)],
+        )
+        self.assertTrue(all(b.time.tzinfo is None for b in tradable))
+
+    def test_aware_query_bounds_are_not_converted(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_parquet(
+                root / "2025-01" / "etf.parquet",
+                [(datetime(2025, 1, 2, 9, 30), "159338.SZ", 1.0)],
+            )
+            repo = ParquetMinuteCloseRepository(root, catalog_path=root / "catalog.sqlite3")
+            with self.assertRaisesRegex(ValueError, "timezone-naive"):
+                repo.get_closes(
+                    "159338.SZ",
+                    start=datetime(2025, 1, 2, 1, 30, tzinfo=timezone.utc),
+                )
+            with self.assertRaisesRegex(ValueError, "timezone-naive"):
+                repo.get_at_or_before(
+                    "159338.SZ",
+                    datetime(2025, 1, 2, 1, 30, tzinfo=timezone.utc),
+                )
+
+    def test_get_at_or_before_uses_naive_beijing_timestamp(self) -> None:
         t0 = datetime(2025, 1, 2, 9, 30)
         with TemporaryDirectory() as temp:
             root = Path(temp)
@@ -111,7 +158,7 @@ class MinuteCloseRepositoryTests(unittest.TestCase):
             )
             repository = ParquetMinuteCloseRepository(root, catalog_path=root / "catalog.sqlite3")
             bar = repository.get_at_or_before(
-                "159338.SZ", datetime(2025, 1, 2, 1, 30, tzinfo=timezone.utc)
+                "159338.SZ", datetime(2025, 1, 2, 9, 30)
             )
 
         self.assertIsNotNone(bar)
