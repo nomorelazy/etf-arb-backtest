@@ -17,7 +17,6 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
-from zoneinfo import ZoneInfo
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -25,7 +24,6 @@ import pyarrow.parquet as pq
 
 
 _MONTH_DIRECTORY = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
-_MARKET_TIMEZONE = ZoneInfo("Asia/Shanghai")
 _REQUIRED_COLUMNS = {"time", "thscode", "close"}
 
 
@@ -163,7 +161,7 @@ class ParquetMinuteCloseRepository:
         if not isinstance(value, datetime):
             raise TypeError("time bounds must be datetime values")
         if value.tzinfo is not None:
-            return value.astimezone(_MARKET_TIMEZONE).replace(tzinfo=None)
+            raise ValueError("time bounds must be timezone-naive Beijing local datetimes")
         return value
 
     def _inspect_file(self, path: Path) -> tuple[dict[str, object], list[tuple[str, int, str, str]]]:
@@ -416,11 +414,14 @@ class ParquetMinuteCloseRepository:
         *,
         start: datetime | None = None,
         end: datetime | None = None,
+        continuous_auction_only: bool = False,
     ) -> tuple[MinuteCloseBar, ...]:
-        """Read one security's close bars and deduplicate identical source rows.
+        """Read one security's timezone-naive Beijing-local minute close bars.
 
-        Conflicting values at the same ``(time, thscode)`` are raised instead
-        of being silently selected, since overlapping source chunks exist.
+        When ``continuous_auction_only`` is true, keep just the A-share
+        continuous auction windows [09:30, 11:30) and [13:00, 14:57).
+        Conflicting values at the same ``(time, thscode)`` are raised rather
+        than silently selected, since overlapping source chunks exist.
         """
         code = str(security_code).strip()
         if not code:
@@ -462,7 +463,7 @@ class ParquetMinuteCloseRepository:
                 else:
                     current[1].add(relative_path)
 
-        return tuple(
+        bars = tuple(
             MinuteCloseBar(
                 time=timestamp,
                 security_code=code,
@@ -471,9 +472,16 @@ class ParquetMinuteCloseRepository:
             )
             for timestamp, (close, paths) in sorted(found.items())
         )
+        if continuous_auction_only:
+            # Apply the trading-session gate after reading source timestamps.
+            # Their timestamp[us] values are already Beijing-local (no tz).
+            from etf_arb.rules.a_share import is_continuous_auction_time
+
+            return tuple(bar for bar in bars if is_continuous_auction_time(bar.time))
+        return bars
 
     def get_at_or_before(self, security_code: str, time: datetime) -> MinuteCloseBar | None:
-        """Return the latest close no later than ``time`` (local or zoned input).
+        """Return the latest close no later than naive Beijing-local ``time``.
 
         Search newest monthly partition first and stop when data is found, so a
         quote lookup near the end of the dataset does not load all prior years.
