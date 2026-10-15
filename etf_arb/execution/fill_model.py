@@ -6,6 +6,11 @@ from decimal import Decimal
 from typing import Protocol
 
 from etf_arb.domain import Quote, QuoteStatus
+from etf_arb.rules.a_share import (
+    CONTINUOUS_AUCTION_SESSIONS,
+    is_continuous_auction_time,
+)
+
 from etf_arb.execution.models import (
     ExecutionResult,
     ExecutionStatus,
@@ -33,10 +38,30 @@ class NextQuoteFillModel:
     """
 
     def execute(self, order: Order, market_data: tuple[Quote, ...]) -> ExecutionResult:
+        # Buy/sell orders can only execute during A-share continuous auction.
+        # This also blocks lunch break and the 14:57 closing call auction.
+        if not is_continuous_auction_time(order.submitted_at):
+            return ExecutionResult(
+                order=order,
+                status=ExecutionStatus.NO_FILL,
+                reason="Order submitted outside continuous-auction trading hours.",
+            )
+
+        # Never fill an afternoon order using a quote from the morning,
+        # a previous day, or outside the same continuous-auction session.
+        clock = order.submitted_at.time()
+        session_start = next(
+            start
+            for start, end in CONTINUOUS_AUCTION_SESSIONS
+            if start <= clock < end
+        )
         candidates = sorted(
             (
                 quote for quote in market_data
                 if quote.security_code == order.security_code
+                and is_continuous_auction_time(quote.ts)
+                and quote.ts.date() == order.submitted_at.date()
+                and quote.ts.time() >= session_start
                 and quote.ts <= order.submitted_at
             ),
             key=lambda quote: quote.ts,
