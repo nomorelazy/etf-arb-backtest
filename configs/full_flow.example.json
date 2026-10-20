@@ -1,0 +1,22 @@
+{
+  "start_date": "2025-01-02",
+  "end_date": "2025-01-06",
+  "settlement_end_date": "2025-01-10",
+  "etf_codes": ["159338"],
+  "pcf_root": "../data/raw/gtfund_pcf",
+  "minute_root": "../data/raw/ifind_minute_close",
+  "output_dir": "../reports/full_flow_example",
+  "trading_days": ["2025-01-02", "2025-01-03", "2025-01-06", "2025-01-07", "2025-01-08", "2025-01-09", "2025-01-10"],
+  "starting_cash": "10000000",
+  "mode": "execute",
+  "quality_check": true,
+  "rules_path": "research_rules.example.json",
+  "simulation": {
+    "premium_threshold": "0.04",
+    "quantity_units": 1,
+    "max_trades_per_day": 1,
+    "cash_substitution_lag": 3,
+    "cash_difference_lag": 1,
+    "security_rule_policy": "assume_tradable"
+  }
+}

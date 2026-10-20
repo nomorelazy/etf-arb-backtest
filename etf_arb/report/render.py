@@ -89,6 +89,11 @@ def save_report(
     total_costs: Decimal | str | int = Decimal("0"),
     annual_risk_free_rate: float = 0.0,
     periods_per_year: int = 252,
+    peak_cash_usage: Decimal = Decimal("0"),
+    filled_orders: int = 0,
+    rejected_orders: int = 0,
+    failed_applications: int = 0,
+    title: str = "ETF Arbitrage Backtest",
 ) -> BacktestSummary:
     """输出 metrics.csv、equity.csv 和 pnl_report.png。"""
     import matplotlib
@@ -108,6 +113,10 @@ def save_report(
         total_costs=Decimal(str(total_costs)),
         annual_risk_free_rate=annual_risk_free_rate,
         periods_per_year=periods_per_year,
+        peak_cash_usage=peak_cash_usage,
+        filled_orders=filled_orders,
+        rejected_orders=rejected_orders,
+        failed_applications=failed_applications,
     )
     save_metrics_csv(summary, output / "metrics.csv")
     save_equity_csv(points, output / "equity.csv")
@@ -151,7 +160,7 @@ def save_report(
         f"Volatility: {_format_percent(summary.annualized_volatility)}",
         f"Return / DD: {_format_metric(summary.return_drawdown_ratio)}",
     ]
-    fig.suptitle("ETF Arbitrage Backtest\n" + "  |  ".join(metric_lines), fontsize=9, y=0.99)
+    fig.suptitle(title + "\n" + "  |  ".join(metric_lines), fontsize=9, y=0.99)
     fig.tight_layout(rect=(0, 0, 1, 0.91))
     chart_path = output / "pnl_report.png"
     fig.savefig(chart_path, dpi=160, bbox_inches="tight")

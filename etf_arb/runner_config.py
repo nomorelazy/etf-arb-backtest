@@ -12,6 +12,7 @@ from etf_arb.data.missing import ifind_minute_grid
 from etf_arb.domain import Side, TradeDecision
 from etf_arb.engine.backtest import BacktestConfig
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
+from etf_arb.simulation_config import SimulationConfig
 
 
 class RunnerConfigError(ValueError):
@@ -38,6 +39,7 @@ class RunnerConfig:
     decisions_path: Path | None = None
     rules_path: Path | None = None
     settlement_end_date: date | None = None
+    simulation: SimulationConfig | None = None
 
     def __post_init__(self) -> None:
         engine = BacktestConfig(self.start_date, self.end_date, self.etf_codes)
@@ -69,6 +71,13 @@ class RunnerConfig:
             raise RunnerConfigError("starting_cash must be a finite positive Decimal")
         if self.mode not in {"replay", "execute"}:
             raise RunnerConfigError("mode must be replay or execute")
+        if self.simulation is not None:
+            if not isinstance(self.simulation, SimulationConfig) or self.mode != "execute":
+                raise RunnerConfigError("simulation requires SimulationConfig and mode=execute")
+            if self.etf_codes != ("159338",):
+                raise RunnerConfigError("The built-in full-flow simulator currently supports only 159338")
+            if self.decisions_path is not None:
+                raise RunnerConfigError("Built-in simulation computes decisions; omit decisions_path")
         if type(self.quality_check) is not bool:
             raise RunnerConfigError("quality_check must be a bool")
         for root in (self.pcf_root, self.minute_root):
@@ -114,12 +123,16 @@ class RunnerConfig:
                 values["clock_times"] = tuple(time.fromisoformat(value) for value in values["clock_times"])
             if "starting_cash" in values:
                 values["starting_cash"] = Decimal(str(values["starting_cash"]))
+            if values.get("simulation") is not None:
+                values["simulation"] = SimulationConfig(**values["simulation"])
             return cls(**values)
         except (TypeError, ValueError, KeyError, ArithmeticError) as error:
             raise RunnerConfigError(f"Invalid runner config {config_path}: {error}") from error
 
     def to_dict(self) -> dict[str, object]:
         def value(item):
+            if isinstance(item, SimulationConfig):
+                return {key.name: value(getattr(item, key.name)) for key in fields(item)}
             if isinstance(item, (date, time)):
                 return item.isoformat()
             if isinstance(item, (Path, Decimal)):
