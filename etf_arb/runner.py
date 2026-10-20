@@ -11,7 +11,7 @@ import heapq
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time
 from pathlib import Path
 from types import MappingProxyType
@@ -97,6 +97,7 @@ class RunnerResult:
     engine_result: BacktestResult
     output_dir: Path
     quality_summary: Mapping[str, object] | None
+    financial_summary: Mapping[str, object] | None = None
 
 
 @dataclass
@@ -126,7 +127,7 @@ class BacktestRunner:
         hooks: RunnerHooks | None = None,
         rules: RuleRepository | None = None,
         portfolio: PortfolioLedger | None = None,
-        reporter: Callable[[RunnerResult, RunnerResources], None] | None = None,
+        reporter: Callable[[RunnerResult, RunnerResources], Mapping[str, object] | None] | None = None,
     ) -> None:
         if not isinstance(config, RunnerConfig):
             raise TypeError("config must be RunnerConfig")
@@ -307,7 +308,9 @@ class BacktestRunner:
                 self.config.output_dir, None if quality is None else MappingProxyType(quality),
             )
             if self.reporter is not None:
-                self.reporter(result, self.resources)
+                financial = self.reporter(result, self.resources)
+                if financial is not None:
+                    result = replace(result, financial_summary=MappingProxyType(dict(financial)))
             self.state = "completed"
             self._write_outputs(result)
             return result
@@ -338,6 +341,11 @@ class BacktestRunner:
             "net_pnl": None,
             "note": "Runner dispatch counts are not fills. Financial reporting belongs to Execution/Settlement/Portfolio and the injected reporter.",
         }
+        if result.financial_summary is not None:
+            summary["financial_summary"] = dict(result.financial_summary)
+            summary["financial_results_available"] = True
+            summary["net_pnl"] = result.financial_summary.get("final_net_pnl")
+            summary["note"] = "Research simulation; see financial_summary and assumptions.json. Pending trades are excluded from final PnL."
         (self.config.output_dir / "run_summary.json").write_text(
             json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8"
         )

@@ -1,0 +1,14 @@
+{
+  "etf_rules": [
+    {
+      "etf_code": "159338",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "14:55:00",
+      "redemption_cutoff": "14:55:00"
+    }
+  ],
+  "security_rules": []
+}

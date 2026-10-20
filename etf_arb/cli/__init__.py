@@ -42,7 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
     missing_parser.add_argument("--output", default="reports/missing")
 
     backtest_parser = subparsers.add_parser(
-        "backtest", help="run the configured clock and external decision replay"
+        "backtest", help="run decision replay or the configured full-flow research simulation"
     )
     backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
 
@@ -61,7 +61,7 @@ def main() -> int:
     if args.command == "status":
         print("Core models, PCF parsing, iFinD minute-close storage and basket pricing are available.")
         print("BacktestRunner supports configuration, quality preflight, clock callbacks and decision replay.")
-        print("Full execution, settlement and account-equity integration require their own implementations.")
+        print("159338 full-flow research simulation supports premium decisions, execution, cash substitution, account equity and reports.")
     elif args.command == "scan-minute-close":
         repository = ParquetMinuteCloseRepository(
             args.root,
@@ -103,9 +103,12 @@ def main() -> int:
         return 1 if report.issues else 0
     elif args.command == "backtest":
         from etf_arb.runner import BacktestRunner, RunnerError
+        from etf_arb.runner_config import RunnerConfig
+        from etf_arb.full_flow import make_full_runner
 
         try:
-            runner = BacktestRunner.from_json(args.config)
+            config = RunnerConfig.from_json(args.config)
+            runner = make_full_runner(config) if config.simulation is not None else BacktestRunner(config)
             result = runner.run()
         except (RunnerError, ValueError, TypeError, OSError) as error:
             print(f"Backtest failed: {error}")
@@ -115,7 +118,12 @@ def main() -> int:
         print(f"Decisions: {result.engine_result.decision_count}")
         print(f"Dispatched: {result.engine_result.dispatched_count}")
         print(f"Outputs: {result.output_dir}")
-        print("This is decision replay; no trade profit or account equity has been calculated.")
+        if result.financial_summary is None:
+            print("This is decision replay; no trade profit or account equity has been calculated.")
+        else:
+            print(f"Research simulation final PnL: {result.financial_summary['final_net_pnl']}")
+            print(f"Pending trades: {result.financial_summary['pending_count']}")
+            print(f"HTML report: {result.output_dir / 'report' / 'report.html'}")
     elif args.command == "report":
         from etf_arb.report.io import load_equity_csv, load_trades_csv
         from etf_arb.report.render import save_report

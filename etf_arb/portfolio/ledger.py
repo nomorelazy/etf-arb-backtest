@@ -1,7 +1,7 @@
 """账户事件账本与套利生命周期记录。
 
 当前版本提供事件流水、套利发起/结算登记和按发起日期汇总净盈亏。
-余额投影、持仓可用性与交易日结算逻辑将在后续阶段实现。
+余额与持仓投影见 portfolio.account；交易日结算见 settlement 与 execution.simulator。
 """
 
 from __future__ import annotations
