@@ -144,7 +144,7 @@ def save_report(
     ax_dd.fill_between(dates, drawdowns, 0, color="#d9534f", alpha=0.35)
     ax_dd.plot(dates, drawdowns, color="#b52b27", linewidth=1.0)
     ax_dd.set_ylabel("Drawdown")
-    ax_dd.yaxis.set_major_formatter(plt.FuncFormatter(lambda value, _: f"{value:.0%}"))
+    ax_dd.yaxis.set_major_formatter(plt.FuncFormatter(lambda value, _: f"{value:.2%}"))
     ax_dd.grid(True, alpha=0.25)
     ax_dd.xaxis.set_major_locator(mdates.AutoDateLocator())
     ax_dd.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))

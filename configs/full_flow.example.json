@@ -12,9 +12,10 @@
   "quality_check": true,
   "rules_path": "research_rules.example.json",
   "simulation": {
-    "premium_threshold": "0.04",
+    "premium_threshold": "0.004",
     "quantity_units": 1,
-    "max_trades_per_day": 1,
+    "max_trades_per_day": null,
+    "min_trade_interval_minutes": 60,
     "cash_substitution_lag": 3,
     "cash_difference_lag": 1,
     "security_rule_policy": "assume_tradable"
