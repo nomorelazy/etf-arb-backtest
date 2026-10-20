@@ -1,0 +1,13 @@
+{
+  "start_date": "2025-01-02",
+  "end_date": "2025-01-03",
+  "etf_codes": ["159338"],
+  "pcf_root": "../../gtfund_pcf",
+  "minute_root": "../../ifind_minute_close",
+  "output_dir": "../reports/runner_demo",
+  "trading_days": ["2025-01-02", "2025-01-03"],
+  "starting_cash": "1000000",
+  "mode": "replay",
+  "quality_check": true,
+  "decisions_path": "decisions.example.json"
+}

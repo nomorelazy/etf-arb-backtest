@@ -165,5 +165,46 @@ class PCFParserTests(unittest.TestCase):
                 FilePCFRepository(temp).get("159338", date(2024, 10, 15))
 
 
+    def test_json_seven_and_eight_column_layouts_use_cash_column(self) -> None:
+        for with_market in (False, True):
+            with self.subTest(with_market=with_market), TemporaryDirectory() as temp:
+                folder = Path(temp) / "512760"
+                folder.mkdir()
+                columns = ["证券代码", "证券简称", "证券数量", "替代标志", "申购溢价比例", "赎回折价比例", "替代金额"]
+                row = ["688019", "Test", "0", "必须", "", "", "0.000"]
+                if with_market:
+                    columns.append("市场ID")
+                    row.append("101")
+                payload = {
+                    "info": [["交易日", "20250102", "TradingDay"]],
+                    "t": {"properties": [["unit", "1000000", "CreationRedemptionUnit"],
+                                           ["cash", "-2659.46", "EstimatedCashComponent"]]},
+                    "securities": {"cols": columns, "rows": [row]},
+                }
+                path = folder / "20250102.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+                pcf = parse_pcf_json(path)
+                self.assertEqual(pcf.estimated_cash_component, Decimal("-2659.46"))
+                self.assertEqual(pcf.components[0].substitution_cash_amount, Decimal("0.000"))
+                self.assertIsNone(pcf.components[0].redemption_discount_rate)
+                self.assertEqual(pcf.components[0].market_code, "101" if with_market else None)
+
+    def test_json_discount_is_not_mistaken_for_cash_amount(self) -> None:
+        with TemporaryDirectory() as temp:
+            folder = Path(temp) / "512760"
+            folder.mkdir()
+            payload = {
+                "info": [["day", "20250102", "TradingDay"]],
+                "t": {"properties": [["unit", "1000000", "CreationRedemptionUnit"]]},
+                "securities": {"rows": [["000001", "Test", "100", "深市退补", "10%", "8%", "123.45"]]},
+            }
+            path = folder / "20250102.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            component = parse_pcf_json(path).components[0]
+            self.assertEqual(component.substitution_cash_amount, Decimal("123.45"))
+            self.assertEqual(component.creation_premium_rate, Decimal("0.10"))
+            self.assertEqual(component.redemption_discount_rate, Decimal("0.08"))
+
+
 if __name__ == "__main__":
     unittest.main()

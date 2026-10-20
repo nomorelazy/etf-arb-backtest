@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date
 from decimal import Decimal
 from pathlib import Path
 
 from etf_arb import __version__
-from etf_arb.data import ParquetMinuteCloseRepository
-from etf_arb.report.io import load_equity_csv, load_trades_csv
-from etf_arb.report.render import save_report
+from etf_arb.data import ParquetMinuteCloseRepository, check_missing
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -29,6 +28,24 @@ def build_parser() -> argparse.ArgumentParser:
     minute_scan_parser.add_argument("--catalog", help="optional SQLite catalog path")
     minute_scan_parser.add_argument("--force", action="store_true", help="re-read unchanged files")
 
+    missing_parser = subparsers.add_parser(
+        "check-missing", help="check PCF and exact minute-price presence without changing source data"
+    )
+    missing_parser.add_argument("--pcf-root", required=True)
+    missing_parser.add_argument("--minute-root", required=True)
+    missing_parser.add_argument("--etf", required=True, nargs="+", help="ETF codes, e.g. 159338 512760")
+    missing_parser.add_argument("--start", required=True, type=date.fromisoformat)
+    missing_parser.add_argument("--end", required=True, type=date.fromisoformat)
+    missing_parser.add_argument(
+        "--trading-days", help="UTF-8 text: one YYYY-MM-DD per trading day; # comments allowed"
+    )
+    missing_parser.add_argument("--output", default="reports/missing")
+
+    backtest_parser = subparsers.add_parser(
+        "backtest", help="run the configured clock and external decision replay"
+    )
+    backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
+
     report_parser = subparsers.add_parser("report", help="build an HTML/PNG report from backtest CSV files")
     report_parser.add_argument("--equity", required=True, help="CSV with date,equity columns")
     report_parser.add_argument("--trades", help="optional CSV with trade_id,net_pnl columns")
@@ -43,7 +60,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if args.command == "status":
         print("Core models, PCF parsing, iFinD minute-close storage and basket pricing are available.")
-        print("Historical market rules, fill simulation and event backtest are pending.")
+        print("BacktestRunner supports configuration, quality preflight, clock callbacks and decision replay.")
+        print("Full execution, settlement and account-equity integration require their own implementations.")
     elif args.command == "scan-minute-close":
         repository = ParquetMinuteCloseRepository(
             args.root,
@@ -58,7 +76,50 @@ def main() -> int:
         print(f"Rows cataloged:      {report.rows_indexed}")
         print(f"Securities cataloged:{report.securities_indexed:>7}")
         print(f"SQLite catalog:      {report.catalog_path}")
+    elif args.command == "check-missing":
+        days = None
+        if args.trading_days:
+            lines = Path(args.trading_days).read_text(encoding="utf-8-sig").splitlines()
+            days = [
+                date.fromisoformat(line.strip())
+                for line in lines if line.strip() and not line.lstrip().startswith("#")
+            ]
+        print("Checking missing data (source minute grid: 242 timestamps/day)...", flush=True)
+        report = check_missing(
+            pcf_root=args.pcf_root, minute_root=args.minute_root, etf_codes=args.etf,
+            start_date=args.start, end_date=args.end, trading_days=days,
+        )
+        summary_path, detail_path = report.save(args.output)
+        summary = report.summary()
+        print(f"Calendar source:     {report.calendar_source}")
+        print(f"Dates checked:       {len(report.checked_dates)}")
+        print(f"Missing issues:      {summary['missing_issue_count']}")
+        print(f"Missing minutes:     {summary['missing_minute_count']}")
+        print(f"Unchecked issues:    {summary['unchecked_issue_count']}")
+        print(f"Summary: {summary_path}")
+        print(f"Details: {detail_path}")
+        if report.calendar_source == "observed":
+            print("Reference dates are observed, not an exchange calendar; days absent from both sources are unknown.")
+        return 1 if report.issues else 0
+    elif args.command == "backtest":
+        from etf_arb.runner import BacktestRunner, RunnerError
+
+        try:
+            runner = BacktestRunner.from_json(args.config)
+            result = runner.run()
+        except (RunnerError, ValueError, TypeError, OSError) as error:
+            print(f"Backtest failed: {error}")
+            return 2
+        print(f"Mode: {result.mode}")
+        print(f"Trading days: {len(result.processed_dates)}")
+        print(f"Decisions: {result.engine_result.decision_count}")
+        print(f"Dispatched: {result.engine_result.dispatched_count}")
+        print(f"Outputs: {result.output_dir}")
+        print("This is decision replay; no trade profit or account equity has been calculated.")
     elif args.command == "report":
+        from etf_arb.report.io import load_equity_csv, load_trades_csv
+        from etf_arb.report.render import save_report
+
         equity = load_equity_csv(args.equity)
         trades = load_trades_csv(args.trades) if args.trades else []
         summary = save_report(

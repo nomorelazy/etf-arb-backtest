@@ -248,14 +248,10 @@ def _pcf_from_fields(
     )
     trading_day = _date(fields.get("TradingDay"), field="TradingDay", required=True)
     assert etf_code is not None and trading_day is not None
-    estimated_cash = _decimal(
-        fields.get(
-            "EstimateCashComponent"
-            if exchange == "SZ" or source_format == "json"
-            else "EstimatedCashComponent"
-        ),
-        field="estimated cash component",
-    )
+    estimated_cash_value = fields.get("EstimateCashComponent") if exchange == "SZ" else fields.get("EstimatedCashComponent")
+    if source_format == "json" and "EstimatedCashComponent" not in fields:
+        estimated_cash_value = fields.get("EstimateCashComponent")
+    estimated_cash = _decimal(estimated_cash_value, field="estimated cash component")
     actual_cash = _decimal(fields.get("CashComponent"), field="CashComponent") if exchange == "SZ" else None
     # Legacy SSE JSON labels the previous PCF's cash component as
     # CashComponent under t-1; align it with the newer PreCashComponent field.
@@ -348,7 +344,23 @@ def _json_properties(container: object) -> dict[str, object]:
     return result
 
 
-def _component_from_legacy_shanghai_json(row: list[object]) -> PCFComponent:
+def _component_from_legacy_shanghai_json(
+    row: list[object], columns: list[object] | None = None,
+) -> PCFComponent:
+    # Source JSON has 6-column, 7-column and 8-column historical layouts.
+    # The last two add a redemption discount before cash, and then a market ID.
+    if columns:
+        if len(columns) != len(row) or "替代金额" not in columns:
+            raise PCFParseError("PCF JSON securities headers do not match the row layout.")
+        cash_index = columns.index("替代金额")
+        discount_index = columns.index("赎回折价比例") if "赎回折价比例" in columns else None
+        market_index = columns.index("市场ID") if "市场ID" in columns else None
+    elif len(row) in (6, 7, 8):
+        cash_index = 5 if len(row) == 6 else 6
+        discount_index = 5 if len(row) >= 7 else None
+        market_index = 7 if len(row) == 8 else None
+    else:
+        raise PCFParseError(f"Unsupported PCF JSON securities row length: {len(row)}")
     code = _text(row[0], field="securities.code", required=True)
     assert code is not None
     raw_fields = {
@@ -357,15 +369,22 @@ def _component_from_legacy_shanghai_json(row: list[object]) -> PCFComponent:
         "Quantity": str(row[2]),
         "SubstitutionFlag": str(row[3]),
         "SubstitutionRate": str(row[4]),
-        "SubstitutionCashAmount": str(row[5]),
+        "SubstitutionCashAmount": str(row[cash_index]),
     }
+    if discount_index is not None:
+        raw_fields["RedemptionDiscountRate"] = str(row[discount_index])
+    if market_index is not None:
+        raw_fields["UnderlyingSecurityID"] = str(row[market_index])
     return PCFComponent(
         security_code=code,
         quantity=_required_decimal(row[2], field="securities.quantity"),
         security_name=_text(row[1], field="securities.name"),
         substitution_flag=_text(row[3], field="securities.substitution_flag"),
         substitution_rate=_rate(row[4], field="securities.substitution_rate"),
-        substitution_cash_amount=_decimal(row[5], field="securities.substitution_cash_amount"),
+        creation_premium_rate=_rate(row[4], field="securities.creation_premium_rate") if discount_index is not None else None,
+        redemption_discount_rate=_rate(row[discount_index], field="securities.redemption_discount_rate") if discount_index is not None else None,
+        substitution_cash_amount=_decimal(row[cash_index], field="securities.substitution_cash_amount"),
+        market_code=_text(row[market_index], field="securities.market_code") if market_index is not None else None,
         raw_fields=_normalized_source_fields(raw_fields),
     )
 
@@ -395,7 +414,7 @@ def parse_pcf_json(path: str | Path) -> PCF:
     for row in rows_data:
         if not isinstance(row, list) or len(row) < 6:
             raise PCFParseError(f"Invalid securities row in {source_path}: {row!r}")
-        rows.append(_component_from_legacy_shanghai_json(row))
+        rows.append(_component_from_legacy_shanghai_json(row, payload["securities"].get("cols")))
     return _pcf_from_fields(
         fields=fields,
         rows=rows,

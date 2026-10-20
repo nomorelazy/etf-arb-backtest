@@ -1,0 +1,24 @@
+[
+  {
+    "etf_code": "159338",
+    "ts": "2025-01-02T10:00:00",
+    "eligible": true,
+    "side": "CREATE",
+    "quantity_units": 1,
+    "gross_edge": "10",
+    "estimated_cost": "2",
+    "estimated_net_edge": "8",
+    "reasons": ["Manually supplied example decision; estimates are illustrative."]
+  },
+  {
+    "etf_code": "159338",
+    "ts": "2025-01-03T10:00:00",
+    "eligible": false,
+    "side": "REDEEM",
+    "quantity_units": 1,
+    "gross_edge": "1",
+    "estimated_cost": "2",
+    "estimated_net_edge": "-1",
+    "reasons": ["Manually supplied rejected example; no strategy was evaluated."]
+  }
+]
