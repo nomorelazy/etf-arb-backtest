@@ -14,7 +14,7 @@ from etf_arb.execution.plan import application_allowed, build_plan
 from etf_arb.portfolio.account import CashAccount, ZERO
 from etf_arb.portfolio.ledger import LedgerEventType as Event
 from etf_arb.report.models import EquityPoint
-from etf_arb.rules import RuleNotFoundError, is_continuous_auction_time
+from etf_arb.rules import RuleNotFoundError, TradeFrequencyRule, is_continuous_auction_time
 from etf_arb.settlement.cash import CashLeg, trading_day_after
 
 
@@ -58,10 +58,12 @@ class ArbitrageSimulator:
         self.trades, self.orders, self.fills, self.rejections = [], [], [], []
         self.equity_curve, self.daily, self.marks = [], [], {}
         self.started_by_day = {}
+        self.frequency = TradeFrequencyRule(settings.min_trade_interval_minutes, settings.max_trades_per_day)
 
-    def available(self, day):
+    def available(self, at):
         return (not any(t.state != "CLOSED" for t in self.trades)
-                and self.started_by_day.get(day, 0) < self.settings.max_trades_per_day)
+                and self.frequency.allows(at, last_started_at=self.trades[-1].decision.ts if self.trades else None,
+                                          started_today=self.started_by_day.get(at.date(), 0)))
 
     def _order(self, trade, symbol, side, quantity, now, purpose, not_before=None):
         if quantity:
@@ -122,8 +124,8 @@ class ArbitrageSimulator:
     def handle(self, decision, context):
         pcf = context.pcfs[decision.etf_code]
         reason = ""
-        if not self.available(context.now.date()):
-            reason = "active_trade_or_daily_limit"
+        if not self.available(context.now):
+            reason = "active_trade_or_frequency_limit"
         elif not is_continuous_auction_time(context.now.time()):
             reason = "outside_continuous_auction"
         elif not application_allowed(pcf, context.resources.rules.get(pcf.etf_code, context.now.date()),

@@ -117,12 +117,23 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(D(summary["final_net_pnl"]), D("100"))
         self.assertEqual(D(summary["ending_cash"]), D("10100"))
 
-    def test_exact_four_percent_in_both_directions_does_not_trigger(self):
-        for price in (3.744, 3.456):
+    def test_exact_point_four_percent_in_both_directions_does_not_trigger(self):
+        self.assertEqual(self.config.simulation.premium_threshold, D("0.004"))
+        for price in (3.6144, 3.5856):
             config = replace(self.config, output_dir=self.root / str(price))
             _, summary = self.run_model(self.market_rows(price, price), config)
             self.assertEqual(summary["opened_count"], 0)
             self.assertEqual(D(summary["final_net_pnl"]), D("0"))
+
+    def test_point_four_threshold_triggers_in_both_directions_and_old_threshold_is_explicit(self):
+        for price, side in ((3.62, Side.CREATE), (3.58, Side.REDEEM)):
+            config = replace(self.config, output_dir=self.root / str(price))
+            runner, summary = self.run_model(self.market_rows(price, price), config)
+            self.assertEqual(summary["opened_count"], 1)
+            self.assertEqual(runner.executor.trades[0].decision.side, side)
+        old = replace(self.config, simulation=replace(self.config.simulation, premium_threshold=D("0.04")))
+        _, summary = self.run_model(self.market_rows(3.62, 3.62), old)
+        self.assertEqual(summary["opened_count"], 0)
 
     def test_incomplete_horizon_keeps_trade_pending_and_final_pnl_null(self):
         config = replace(self.config, trading_days=DAYS[:2], settlement_end_date=DAYS[1])

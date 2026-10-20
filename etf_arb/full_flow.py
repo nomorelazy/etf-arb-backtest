@@ -37,6 +37,7 @@ def make_full_runner(config, *, rules=None):
         account = executor.account
         period = resources.portfolio.summarize_pnl(config.start_date, config.end_date)
         summary = dict(
+            premium_threshold=str(settings.premium_threshold),
             settlement_basis="research_proxy", opened_count=period.opened_count,
             settled_count=period.settled_count, pending_count=period.pending_count,
             settled_net_pnl=str(period.settled_net_pnl),
@@ -68,7 +69,7 @@ def make_full_runner(config, *, rules=None):
             manager_execution="SH allowed substitution uses simulated manager trades on strictly later minute closes, zero costs; no actual fund-manager execution or refund records are available",
             substitution_payment=f"Aggregate net refund (CREATE) / proceeds (REDEEM) no earlier than application + {settings.cash_substitution_lag} supplied trading days and completion of all manager proxy orders. Provisional redemption cash is not made available early.",
             cash_difference=f"Subsequent PCF CashComponent matched only via PreTradingDay; payment {settings.cash_difference_lag} supplied trading days after publication. Tail horizon exhaustion leaves a pending leg.",
-            scheduling="One active cycle at a time, including pending settlement; per-day cap is explicit simulation configuration",
+            scheduling=f"One active cycle including pending settlement; rolling {settings.min_trade_interval_minutes} minutes between arbitrage starts; daily cap={settings.max_trades_per_day} (None means no daily cap). CREATE and REDEEM share the quota; constituent orders do not consume it.",
             valuation="Cash + holdings at latest observed close + unsettled receivables/payables; stale holdings marks flagged in daily_account.csv",
             calendar="Explicit supplied calendar. See configuration/source notes; no weekday approximation.",
             settings=asdict(settings),
@@ -109,6 +110,8 @@ def make_full_runner(config, *, rules=None):
         path = output / "report" / "report.html"
         html = path.read_text(encoding="utf-8")
         notice = ("<aside style='padding:18px;background:#fff3cd;color:#332600'><strong>研究模拟：费用=0，滑点=0；现金替代按分钟行情模拟基金经理交易。</strong>"
+                  f"<p>触发阈值 ±{(settings.premium_threshold * 100).normalize()}%；信号区间 {config.start_date} 至 {config.end_date}，结算尾期至 {config.settlement_end_date}。</p>"
+                  f"<p>发起间隔至少 {settings.min_trade_interval_minutes} 分钟；每日次数上限：{settings.max_trades_per_day if settings.max_trades_per_day is not None else '无'}；上一笔全部结算完成后才发起下一笔。</p>"
                   f"<p>发起 {period.opened_count} 笔；完成 {period.settled_count} 笔；待完成 {period.pending_count} 笔。"
                   f"已完成净盈亏 {period.settled_net_pnl}；区间最终净盈亏 "
                   f"{period.final_net_pnl if period.final_net_pnl is not None else '待结算，暂不能确定'}。</p>"

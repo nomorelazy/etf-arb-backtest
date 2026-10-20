@@ -45,7 +45,7 @@ class PremiumDiscountSource:
         premium = etf.close / valuation.iopv - 1
         row.update(etf_close=etf.close, iopv=valuation.iopv, premium=premium)
         threshold = self.settings.premium_threshold
-        # Compare numerator values to avoid rounding an exact 4% into a crossing.
+        # Compare numerator values to avoid rounding an exact threshold into a crossing.
         numerator = valuation.numerator
         market_value = etf.close * pcf.creation_unit
         side = (Side.CREATE if market_value > numerator * (1 + threshold) else
@@ -54,8 +54,8 @@ class PremiumDiscountSource:
             row["reason"] = "below_threshold"
             return ()
         row["side"] = side.value
-        if not self.available(now.date()):
-            row["reason"] = "active_trade_or_daily_limit"
+        if not self.available(now):
+            row["reason"] = "active_trade_or_frequency_limit"
             return ()
         # Leave two bars for building the basket and selling the received assets.
         if now.time() > time(14, 53):
