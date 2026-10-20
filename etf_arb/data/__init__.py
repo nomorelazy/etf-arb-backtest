@@ -14,10 +14,13 @@ from etf_arb.data.minute_close import (
     MinuteCloseScanReport,
     ParquetMinuteCloseRepository,
 )
+from etf_arb.data.missing import MissingIssue, MissingReport, check_missing, ifind_minute_grid
 
 __all__ = [
     "FilePCFRepository",
     "MinuteCloseBar",
+    "MissingIssue",
+    "MissingReport",
     "MinuteCloseConflictError",
     "MinuteCloseDataError",
     "MinuteCloseScanReport",
@@ -26,4 +29,6 @@ __all__ = [
     "parse_pcf",
     "parse_pcf_json",
     "parse_pcf_xml",
+    "check_missing",
+    "ifind_minute_grid",
 ]

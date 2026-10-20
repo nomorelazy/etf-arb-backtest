@@ -18,6 +18,64 @@ python -m etf_arb.cli status
 python -m unittest discover -s tests -v
 ```
 
+## BacktestRunner 回测入口
+
+`etf_arb/runner.py` 的 `BacktestRunner` 是总调度入口；配置和外部输入加载在
+`etf_arb/runner_config.py`。Engine 保留独立职责：校验、排序、分发外部
+`TradeDecision`，不重新计算信号。当前提供手动决策回放，可以先验证数据、
+日期和事件调度，执行与结算算法通过独立接口接入。
+
+从项目根目录运行：
+
+```powershell
+python -m etf_arb.cli backtest --config configs/runner.example.json
+```
+
+示例读取桌面的两份真实数据，回放 2025-01-02 和 2025-01-03 的两条人工示例
+决策；其中的价差和成本仅为示例输入，没有通过行情计算。`mode=replay` 不调用
+执行器，不生成成交或收益；报告里的 `net_pnl=null`，不会把估算价差计作利润。
+示例已运行的结果可查看 `reports/runner_demo/run_summary.json`。
+
+配置中的路径以配置文件所在目录为基准。`trading_days` 必须提供，既可为递增、
+唯一的日期数组，也可为交易日文本文件路径（UTF-8，每行 `YYYY-MM-DD`，
+支持空行和 `#` 注释）。不使用“周一至周五”猜测交易日。`starting_cash` 使用
+字符串金额，它作为账户模块初始化参数保存；Runner 自身不实现现金余额投影。
+`clock_times` 默认使用源数据的 242 个分钟标签，可显式设置其他时点；它同时
+决定缺失检查所要求的时间标签，不代表这些时点都允许下单。
+
+运行顺序为：读取并校验外部决策 → 初始化仓库 → 缺失检查 → 建立行情索引 →
+逐日/逐时点调度 → Engine 分发决策 → 调用结果报告接口。默认启用质量检查，
+有缺失或未检查项时保存明细并停止。`quality_check=false` 可显式跳过检查，
+输出会记录这一选择。同一时刻按“日初 → 已排队回调 → 时钟/信号源 → 决策分发
+→ 日末”处理；回调中创建的同一时刻事件在当前事件之后执行。
+
+Python 接入接口如下：
+
+| 接口 | 职责 |
+| --- | --- |
+| `DecisionSource.on_time(context)` | 在当前时点返回已计算的决策，决策时间必须等于 `context.now` |
+| `DecisionExecutor.handle(decision, context)` | 创建并执行交易计划；Runner 不代替执行器计算成交 |
+| `RunnerHooks.on_day_open/on_time/on_day_close` | 推进外部执行、结算、账户快照等独立组件 |
+| `context.schedule(at, callback, label)` | 安排将来的成交/到账/结算回调，回调接收该时点的新 context |
+| `context.get_close(code)` | 获取当前日期、不晚于当前时点的最近 close，不跨日回退、不生成买卖盘口 |
+| `reporter(result, resources)` | 根据外部账户、成交和结算结果生成最终报告 |
+
+`mode=execute` 必须通过 Python API 注入执行器，并提供历史规则仓库或
+`rules_path`，不能仅切换 JSON 开关就声称发生了交易。规则文件接受
+`etf_rules`、`security_rules` 数组，字段与现有规则模型对应；缺少历史规则
+会明确报错，不使用今日规则回填。没有提供规则的回放模式初始化空规则仓库，
+不会自动创造交易规则。
+
+`end_date` 是允许发起决策的截止日期。要继续处理跨日结算，可配置更晚的
+`settlement_end_date`，并在 `trading_days` 中列出尾期交易日；尾期仍推进回调，
+但不再调用新决策信号源。超出运行日历的定时事件会报错，避免静默丢弃结算。
+
+每次使用新的空输出目录。输出包括 `config.json`、`quality/`、
+`market_catalog.sqlite3`、`event_log.csv`、`decisions.csv` 和 `run_summary.json`。
+行情索引写入输出目录，原始数据不改写。回调失败会向上传播并写失败摘要，
+之前已发生的处理不由 Runner 自动回滚。Runner 实例只允许运行一次。
+再次运行示例前，请将配置的 `output_dir` 改成新的目录，以保留上次结果。
+
 ## 生成可视化报告
 
 回测完成后，将按交易日汇总的账户总权益保存为 `date,equity` CSV；每笔已完整平仓套利交易的净 PnL 保存为 `trade_id,net_pnl` CSV。例如：
@@ -178,6 +236,41 @@ assert rule.can_buy() and rule.can_sell()
 若查询的日期本身全天停牌，`delisting_trading_day_index` 返回 `None`，建立规则时传 `is_suspended=True, is_delisting_period=True`，并**不传交易日序号**，买卖都会禁用。当天复牌后继续递增之前的有效交易日序号。序号为 16 或以上时，规则自动禁用买卖。普通主板 ST 的历史规则仍为 2026-07-06 之前 ±5%、当日起 ±10%。
 
 对实际订单执行 `NextQuoteFillModel(security_rules=InMemoryRuleRepository(...))`，撮合会读取当日股票规则，拦截停牌、已结束退市整理期以及被禁止的买卖方向。未注入规则仓库的旧式撮合仅能依赖行情快照中的停牌标志，不能根据证券主数据识别当天停牌；完整回测应注入规则仓库。
+
+## 缺失数据检查
+
+`check-missing` 只读取 PCF 和分钟 Parquet，输出缺口明细；不修改原始数据、
+不补值、不检查异常价格或处理结算。例：
+
+```powershell
+python -m etf_arb.cli check-missing `
+  --pcf-root ..\gtfund_pcf `
+  --minute-root ..\ifind_minute_close `
+  --etf 159338 159516 512760 512880 515880 `
+  --start 2025-01-02 --end 2026-07-22 `
+  --output reports/missing
+```
+
+输出 `summary.json` 和 UTF-8 BOM 的 `missing.csv`。检查内容包括 PCF 文件、
+来源声明的成分股总行数、预估现金字段、现金替代标志及必须替代项的现金金额，以及 ETF/需行情成分股
+整日或逐分钟的非空 close。相同键重复出现不增加覆盖率；非空的零值或异常
+价格仍属于“已存在”，交给独立异常检查处理。无法读取的文件、无法识别的
+标志和无法确定市场的证券会列为 `UNCHECKED`，不会静默视为检查通过。
+PCF JSON 按源文件表头兼容 6、7、8 列布局，避免把赎回折价比例当成替代金额；
+同时支持预估现金字段的 `EstimateCashComponent` 和 `EstimatedCashComponent` 名称。
+
+默认使用现有 iFinD 数据的 242 个时间标签（09:30—11:30、13:00—15:00，
+两端包含），包括 11:30 和收盘集合竞价时间；这不是下单可用时段。Python
+接口 `check_missing(expected_times=...)` 可传入其他来源的时间标签。
+缺行情只代表未发现对应记录，不据此判定停牌，也不会用旧价格填补。
+
+未提供交易日列表时，检查日期取指定区间内“所选 ETF 的 PCF 日期与行情
+日期”的并集，报告 `calendar_source=observed`；两边同时缺失的整日不能
+由这种参考发现，不能据此声称区间数据完整。可加 `--trading-days days.txt`，
+提供真实交易日列表（UTF-8，每行一个 `YYYY-MM-DD`，支持空行和 `#` 注释）。
+应按所选 ETF 的存续区间检查，避免把上市前日期当成缺失。仅在提供外部
+日期参考、存在检查日期且没有缺口或未检查项时，`passed` 才为 `true`。
+发现缺口或未检查项时命令返回码为 1；没有发现问题时为 0，但仍需查看日期参考。
 
 ## 尚未实现
 
