@@ -81,9 +81,10 @@ class PremiumDiscountSource:
                                  else "missing_cash_substitution_data")
                 return ()
         if not self.available(now):
-            row["reason"] = "active_trade_or_frequency_limit"
+            row["reason"] = "application_interval_or_pending_start"
             return ()
-        if not self.trading_times.has_later_minute_today(now.time()):
+        if not any(clock > now.time() and self.trading_times.allows(clock)
+                   for clock in context.resources.config.clock_times):
             row["reason"] = "no_later_entry_minute_today"
             return ()
         rule = context.resources.rules.get(pcf.etf_code, now.date())

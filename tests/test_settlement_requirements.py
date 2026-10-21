@@ -44,9 +44,10 @@ class RequirementsIntegrationTests(unittest.TestCase):
     def run_model(self, config=None, rows=None):
         return self.fixture.run_model(rows, config or self.config)
 
-    def test_priced_is_not_paid_and_does_not_unlock_a_second_cycle(self):
+    def test_priced_is_not_paid_but_does_not_block_later_hourly_cycles(self):
         runner, summary = self.run_model(replace(self.config, end_date=fixtures.DAYS[-1]))
-        self.assertEqual(summary['opened_count'], 1)
+        self.assertEqual(summary['opened_count'], 3)
+        self.assertEqual(summary['pending_count'], 3)
         self.assertEqual(summary['settled_count'], 0)
         self.assertIsNone(summary['final_net_pnl'])
         self.assertTrue(all(leg.final is not None and not leg.paid for leg in runner.executor.trades[0].legs))
@@ -126,6 +127,7 @@ class RequirementsIntegrationTests(unittest.TestCase):
         rows = [(ts,symbol,5 if symbol=='600000.SH' and ts==datetime.combine(day,time(15)) else price)
                 for ts,symbol,price in rows]
         config = replace(self.config,quality_check=False,
+                         simulation=replace(self.config.simulation, max_trades_per_day=1),
                          clock_times=tuple(sorted(set(fixtures.CLOCKS+(time(14,29),time(14,31))))))
         runner,_ = self.run_model(config,rows)
         self.assertFalse(any(f['purpose']=='MANAGER' for f in runner.executor.fills))

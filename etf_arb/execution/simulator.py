@@ -75,6 +75,7 @@ class ArbitrageSimulator:
         self.substitution_attempts = []
         self.creation_substitutions = []
         self.fee_rows = []
+        self.peak_open_cycles = 0
 
     def _fee_for(self, symbol, side, quantity, price):
         return self.fee_model.calculate(
@@ -82,9 +83,13 @@ class ArbitrageSimulator:
             side=side, turnover=quantity * price)
 
     def available(self, at):
-        return (not any(t.state != "CLOSED" for t in self.trades)
-                and self.frequency.allows(at, last_started_at=self.trades[-1].decision.ts if self.trades else None,
-                                          started_today=self.started_by_day.get(at.date(), 0)))
+        # A pending signal has not started creation/redemption yet. Wait for
+        # that actual application timestamp before starting its hourly clock.
+        if any(t.applied_at is None for t in self.trades):
+            return False
+        latest = max((t.applied_at for t in self.trades), default=None)
+        return self.frequency.allows(at, last_started_at=latest,
+                                     started_today=self.started_by_day.get(at.date(), 0))
 
     def _order(self, trade, symbol, side, quantity, now, purpose, not_before=None):
         if quantity:
@@ -133,7 +138,7 @@ class ArbitrageSimulator:
         pcf = context.pcfs[decision.etf_code]
         reason = ""
         if not self.available(context.now):
-            reason = "active_trade_or_frequency_limit"
+            reason = "application_interval_or_pending_start"
         elif self.trading_times.is_blocked(context.now.time()):
             reason = "blocked_trade_minute"
         elif not self.trading_times.allows(context.now.time()):
@@ -177,6 +182,8 @@ class ArbitrageSimulator:
             return
         trade = SimTrade(f"T{len(self.trades)+1:06}", decision, pcf, plan)
         self.trades.append(trade)
+        self.peak_open_cycles = max(self.peak_open_cycles,
+                                    sum(t.state != "CLOSED" for t in self.trades))
         for component in pcf.components:
             symbol = component_symbol(component) if not component.is_cash_placeholder else None
             if symbol in plan.optional_creation_substitutions:
@@ -186,7 +193,6 @@ class ArbitrageSimulator:
                     premium_rate=component.creation_premium_rate,
                     deposit=plan.optional_creation_substitutions[symbol],
                     reason=basket.substitution_reasons[symbol], basis="signal_minute_close_plus_pcf_premium"))
-        self.started_by_day[context.now.date()] = self.started_by_day.get(context.now.date(), 0) + 1
         context.resources.portfolio.open_trade(trade_id=trade.trade_id, opened_at=context.now,
                                                side=decision.side, etf_shares=plan.etf_shares)
         for symbol, quantity in entries.items():
@@ -310,6 +316,7 @@ class ArbitrageSimulator:
         trade.applied_at, trade.cash_deposit, trade.state = now, deposit, "APPLIED"
         self.account.post(now, trade.trade_id, Event.CREATE_SUBMITTED if side is Side.CREATE else Event.REDEEM_SUBMITTED,
                           cash=-due_cash)
+        self.started_by_day[now.date()] = self.started_by_day.get(now.date(), 0) + 1
         if side is Side.CREATE:
             for symbol, quantity in plan.physical.items():
                 self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol=symbol, quantity=-quantity)

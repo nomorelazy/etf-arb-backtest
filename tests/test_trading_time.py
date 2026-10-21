@@ -53,7 +53,7 @@ class TradingTimeIntegrationTests(unittest.TestCase):
         runner=make_full_runner(self.config,rules=self.rules)
         manual=TradeDecision("159338",datetime(2025,1,2,9,30),True,Side.CREATE,1,D("1"),D("0"),D("1"))
         result=runner.run([manual])
-        self.assertEqual(result.financial_summary['opened_count'],1)
+        self.assertEqual(result.financial_summary['opened_count'],3)
         self.assertEqual(runner.executor.trades[0].decision.ts.time(),time(9,35))
         self.assertEqual(runner.executor.fills[0]['ts'].time(),time(9,36))
         self.assertEqual(runner.executor.rejections[0]['reason'],'blocked_trade_minute')

@@ -207,6 +207,10 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                     f"已结清 {financial_summary['settled_count']} 笔，待完成 {financial_summary['pending_count']} 笔。</p>"
                     f"<p>本轮折溢价门槛：{Decimal(financial_summary['premium_threshold']):.4%}。"
                     "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
+        if financial_summary.get('frequency_anchor') == 'application_submitted_at':
+            details += (f"<p>交易节奏：以上一笔实际提交申赎时间起算，满 {financial_summary['min_trade_interval_minutes']} 分钟后，"
+                        "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"
+                        f"本轮未结清套利数量峰值：{financial_summary['peak_open_cycles']} 笔。</p>")
         if 'fee_breakdown' in financial_summary:
             details += (f"<h2>交易税费</h2><p>成交税费合计 {Decimal(financial_summary['fee']):,.2f} 元；"
                         f"其中投资者账户扣款 {Decimal(financial_summary['investor_fees']):,.2f} 元，"

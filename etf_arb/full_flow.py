@@ -3,7 +3,7 @@
 import csv
 import json
 from dataclasses import asdict
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from etf_arb.data.snapshot import DailyCloseCache
@@ -60,6 +60,9 @@ def make_full_runner(config, *, rules=None):
             held_pending_policy_count=sum(t.state == "HELD_PENDING_POLICY" for t in executor.trades),
             assume_full_basket_fill=settings.assume_full_basket_fill,
             priced_unpaid_cash_legs=sum(leg.final is not None and not leg.paid for t in executor.trades for leg in t.legs),
+            frequency_anchor="application_submitted_at",
+            min_trade_interval_minutes=settings.min_trade_interval_minutes,
+            peak_open_cycles=executor.peak_open_cycles,
         )
         # Reconcile all actual model cash flows to the ledger and the starting balance.
         if account.cash - account.starting_cash != sum(account.trade_cash.values(), Decimal("0")):
@@ -89,7 +92,7 @@ def make_full_runner(config, *, rules=None):
             substitution_pricing=f"Ordinary research case: at most {settings.cash_substitution_pricing_days} supplied trading days after application; unfilled proxy quantities valued only at the exact deadline-day 15:00 close. This is valuation, not an investor fill. Missing deadline close leaves pricing unresolved. Individual suspended-day extensions, corporate actions and the 20-day special case require additional historical inputs.",
             substitution_payment="Pricing, notice and payment are separate. Explicit business calendar determines notice/bound dates; only a supplied payment timestamp credits cash. Missing payment date stays unpaid. An explicitly configured non-null cash_substitution_lag is a research override, not a prospectus payment guarantee.",
             cash_difference="Subsequent PCF CashComponent matched only via PreTradingDay. Default payment requires a supplied timestamp; a non-null cash_difference_lag is an explicit research override.",
-            scheduling=f"One active cycle including pending settlement; rolling {settings.min_trade_interval_minutes} minutes between arbitrage starts; daily cap={settings.max_trades_per_day} (None means no daily cap). CREATE and REDEEM share the quota; constituent orders do not consume it.",
+            scheduling=f"Overlapping cycles are allowed, including unpaid cash settlements. A new signal may open a cycle after {settings.min_trade_interval_minutes} elapsed minutes from the latest actual creation/redemption submission (applied_at), subject to cash, basket and trading-session checks. A not-yet-submitted entry waits for its application timestamp before the clock starts. Daily cap={settings.max_trades_per_day} (None means no daily cap). CREATE and REDEEM share the quota; stock orders do not consume it. No intraday reset; lunch counts as elapsed time.",
             valuation="Cash + holdings at latest observed close + unsettled receivables/payables; stale holdings marks flagged in daily_account.csv",
             calendar="Explicit supplied calendar. See configuration/source notes; no weekday approximation.",
             settings=asdict(settings),
@@ -122,6 +125,9 @@ def make_full_runner(config, *, rules=None):
         _csv(output / "rejections.csv", executor.rejections, ["ts", "reason"])
         trade_by_id = {t.trade_id: t for t in executor.trades}
         trade_rows = [dict(trade_id=t.trade_id, opened_at=t.opened_at, settled_at=t.settled_at,
+             applied_at=trade_by_id[t.trade_id].applied_at,
+             next_signal_not_before=(trade_by_id[t.trade_id].applied_at + timedelta(minutes=settings.min_trade_interval_minutes)
+                                     if trade_by_id[t.trade_id].applied_at else None),
              side=trade_by_id[t.trade_id].decision.side.value, state=trade_by_id[t.trade_id].state,
              quantity_units=trade_by_id[t.trade_id].decision.quantity_units,
              etf_shares=trade_by_id[t.trade_id].plan.etf_shares,
@@ -132,7 +138,7 @@ def make_full_runner(config, *, rules=None):
              estimated_cash=trade_by_id[t.trade_id].plan.estimated_cash,
              net_pnl=t.pnl, reason=trade_by_id[t.trade_id].reason) for t in resources.portfolio.trades]
         _csv(output / "trades.csv", trade_rows,
-             ["trade_id", "opened_at", "settled_at", "side", "quantity_units", "etf_shares", "etf_leg_amount", "state", "net_pnl", "reason",
+             ["trade_id", "opened_at", "applied_at", "next_signal_not_before", "settled_at", "side", "quantity_units", "etf_shares", "etf_leg_amount", "state", "net_pnl", "reason",
               "pcf_path", "substitution_deposit", "domestic_fixed_cash", "estimated_cash"])
         resources.portfolio.export_csv(output / "portfolio_ledger.csv")
         settlement_rows = [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs]
