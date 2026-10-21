@@ -17,6 +17,7 @@ from etf_arb.portfolio.ledger import PortfolioLedger
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
 from etf_arb.runner_config import RunnerConfig
 from etf_arb.simulation_config import SimulationConfig
+from etf_arb.costs import FeeRates
 from etf_arb.domain import Side
 from test_missing_data import write_market
 
@@ -37,7 +38,7 @@ class FullFlowTests(unittest.TestCase):
         self.config = RunnerConfig(DAYS[0], DAYS[0], ("159338",), self.pcf, self.market,
                                    self.root / "run", DAYS, starting_cash=D("10000"), mode="execute",
                                    clock_times=CLOCKS, settlement_end_date=DAYS[-1],
-                                   simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56"))))
+                                   simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56")), fees=FeeRates.zero()))
         self.write_pcfs()
 
     def write_pcfs(self, wrong_date=False):

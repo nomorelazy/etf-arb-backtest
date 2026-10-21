@@ -1,13 +1,13 @@
 """Independent premium/discount decision source. Engine does not reprice signals."""
 
 from datetime import timedelta
-from decimal import Decimal
 import json
 
 from etf_arb.data.snapshot import component_symbol
+from etf_arb.costs import AssetType, TradeFeeModel
 from etf_arb.decision.basket import check_creation_basket
 from etf_arb.domain import Quote, Side, TradeDecision
-from etf_arb.execution.plan import application_allowed
+from etf_arb.execution.plan import application_allowed, build_plan
 from etf_arb.pricing.errors import PricingDataError
 from etf_arb.pricing.iopv import calculate_iopv_159338
 from etf_arb.pricing.premium_discount import calculate_premium_discount
@@ -20,13 +20,15 @@ class PremiumDiscountSource:
             raise ValueError("Set simulation.premium_threshold or --premium-threshold explicitly before running signals")
         self.prices, self.settings, self.available = prices, settings, available
         self.rows = []
+        self.fee_model = TradeFeeModel(settings.fees)
         self.trading_times = TradingTimeRule(settings.blocked_trade_minutes, settings.trading_sessions)
 
     def on_time(self, context):
         now = context.now
         pcf = context.pcfs["159338"]
         row = dict(ts=now, etf_close=None, iopv=None, premium=None, side="", reason="",
-                   blocked_components="", component_reasons="", cash_substituted_components="")
+                   blocked_components="", component_reasons="", cash_substituted_components="",
+                   estimated_fee=None, estimated_net_edge=None)
         self.rows.append(row)
         if self.trading_times.is_blocked(now.time()):
             row["reason"] = "blocked_trade_minute"
@@ -67,6 +69,7 @@ class PremiumDiscountSource:
             row["reason"] = "below_threshold"
             return ()
         row["side"] = side.value
+        basket = None
         if side is Side.CREATE:
             basket = check_creation_basket(pcf, self.prices, context.resources.rules, now,
                                            self.settings.security_rule_policy)
@@ -87,7 +90,23 @@ class PremiumDiscountSource:
         if not application_allowed(pcf, rule, side, self.settings.quantity_units, now.time()):
             row["reason"] = "application_disabled_or_limit"
             return ()
-        row["reason"] = "threshold_crossed"
         edge = abs(market_value - numerator) * self.settings.quantity_units
+        try:
+            plan = build_plan(pcf, side, self.settings.quantity_units,
+                              creation_cash_substitutions=basket.cash_substitutions if basket else None)
+            etf_side = "SELL" if side is Side.CREATE else "BUY"
+            stock_side = "BUY" if side is Side.CREATE else "SELL"
+            cost = self.fee_model.calculate(asset_type=AssetType.ETF, side=etf_side,
+                                           turnover=etf.close * plan.etf_shares).total
+            for symbol, quantity in (plan.physical | plan.manager).items():
+                bar = self.prices.get(symbol, now)
+                if bar is None:
+                    raise ValueError(f"Missing fee estimate quote: {symbol}")
+                cost += self.fee_model.calculate(asset_type=AssetType.STOCK, side=stock_side,
+                                                turnover=bar.close * quantity).total
+        except ValueError as error:
+            row["reason"] = f"unexecutable_plan: {error}"
+            return ()
+        row.update(reason="threshold_crossed", estimated_fee=cost, estimated_net_edge=edge - cost)
         return (TradeDecision(pcf.etf_code, now, True, side, self.settings.quantity_units,
-                              edge, Decimal("0"), edge, ("premium_discount_threshold",)),)
+                              edge, cost, edge - cost, ("premium_discount_threshold",)),)

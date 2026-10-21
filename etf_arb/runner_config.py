@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from etf_arb.data.missing import ifind_minute_grid
+from etf_arb.costs import FeeRates
 from etf_arb.domain import Side, TradeDecision
 from etf_arb.engine.backtest import BacktestConfig
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
@@ -149,7 +150,7 @@ class RunnerConfig:
 
     def to_dict(self) -> dict[str, object]:
         def value(item):
-            if isinstance(item, SimulationConfig):
+            if isinstance(item, (SimulationConfig, FeeRates)):
                 return {key.name: value(getattr(item, key.name)) for key in fields(item)}
             if isinstance(item, (date, time)):
                 return item.isoformat()

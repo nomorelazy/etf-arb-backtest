@@ -20,9 +20,9 @@ def _table(rows):
             + "</tbody></table></div>")
 
 
-def save_ledger_report(path, trades, cashflows, fills, settlements, pricing_rows=(), attempt_rows=(), creation_substitutions=()):
+def save_ledger_report(path, trades, cashflows, fills, settlements, pricing_rows=(), attempt_rows=(), creation_substitutions=(), fee_rows=()):
     groups = []
-    for records in (cashflows, fills, settlements, pricing_rows, attempt_rows, creation_substitutions):
+    for records in (cashflows, fills, settlements, pricing_rows, attempt_rows, creation_substitutions, fee_rows):
         grouped = defaultdict(list)
         for row in records:
             grouped[row['trade_id']].append(row)
@@ -36,7 +36,7 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
 @media print{button{display:none}.scroll{overflow:visible}table{white-space:normal;font-size:9px}details{break-before:page}}
 </style><h1>逐笔完整账本</h1>
 <p>现金流入为正、流出为负。买入支出不等于亏损，卖出收入不等于盈利；全部交易腿及款项结清后的现金流合计才是最终盈亏。</p>
-<p>基金经理代买卖是现金替代计算依据，不重复计入投资者现金流水；定价日收盘估值不伪装成成交。当前使用 close 简化成交，手续费及额外滑点为零。</p>
+<p>基金经理代买卖是现金替代计算依据，其税费计入退补款，不重复扣投资者现金；定价日收盘估值不伪装成成交。当前使用 close 简化成交，税费按本轮配置逐笔计算，额外滑点为零。</p>
 <button onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">展开全部</button>
 <button onclick="document.querySelectorAll('details').forEach(d=>d.open=true);window.print()">打印全部</button>"""
     for trade in trades:
@@ -50,6 +50,7 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
         document += f"<details><summary>{escape(tid)} | {escape(str(trade['opened_at']))} | {label} {total:+f} 元</summary>"
         document += _table([trade]) + "<h2>全部账户现金及证券事件</h2>" + _table(flows)
         document += "<h2>投资者成交</h2>" + _table(row for row in groups[1][tid] if row['purpose'] != 'MANAGER')
+        document += "<h2>逐笔交易税费（投资者扣款与代买卖费用分别标记）</h2>" + _table(groups[6][tid])
         document += "<h2>深市成分股买入转现金替代（保证金计算）</h2>" + _table(groups[5][tid])
         document += "<h2>现金替代代买卖尝试（含未成交原因）</h2>" + _table(groups[4][tid])
         document += "<h2>现金替代代买卖计算依据（不重复加减现金）</h2>" + _table(row for row in groups[1][tid] if row['purpose'] == 'MANAGER')

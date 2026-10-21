@@ -36,6 +36,10 @@ def make_full_runner(config, *, rules=None):
     def report(result, resources):
         output = config.output_dir
         account = executor.account
+        fee_totals = {name: sum((row[name] for row in executor.fee_rows), Decimal("0"))
+                      for name in ("commission", "stamp_duty", "transfer_fee", "handling_fee", "total")}
+        investor_fees = sum((row["total"] for row in executor.fee_rows if row["charged_to"] == "investor_cash"), Decimal("0"))
+        manager_fees = fee_totals["total"] - investor_fees
         period = resources.portfolio.summarize_pnl(config.start_date, config.end_date)
         summary = dict(
             premium_threshold=str(settings.premium_threshold),
@@ -47,7 +51,9 @@ def make_full_runner(config, *, rules=None):
             final_net_pnl=None if period.final_net_pnl is None else str(period.final_net_pnl),
             ending_cash=str(account.cash), ending_equity=str(executor.equity_curve[-1].equity),
             marked_account_pnl=str(executor.equity_curve[-1].equity - config.starting_cash),
-            fee="0", slippage="0", order_count=len(executor.orders),
+            fee=str(fee_totals["total"]), fee_breakdown={name: str(value) for name, value in fee_totals.items()},
+            investor_fees=str(investor_fees), manager_fees=str(manager_fees),
+            slippage="0", order_count=len(executor.orders),
             fill_count=sum(f["purpose"] != "MANAGER" for f in executor.fills),
             manager_proxy_fill_count=sum(f["purpose"] == "MANAGER" for f in executor.fills),
             rejected_decision_count=len(executor.rejections),
@@ -58,13 +64,18 @@ def make_full_runner(config, *, rules=None):
         # Reconcile all actual model cash flows to the ledger and the starting balance.
         if account.cash - account.starting_cash != sum(account.trade_cash.values(), Decimal("0")):
             raise AssertionError("Account cash reconciliation failed")
+        fee_events = {"COMMISSION_PAID", "STAMP_DUTY_PAID", "TRANSFER_FEE_PAID", "HANDLING_FEE_PAID"}
+        if investor_fees != -sum((row["cash_delta"] for row in account.rows if row["event"] in fee_events), Decimal("0")):
+            raise AssertionError("Investor fee cash reconciliation failed")
         if not period.pending_count and not any(account.positions.values()):
             if account.cash - account.starting_cash != period.settled_net_pnl:
                 raise AssertionError("Closed trade PnL reconciliation failed")
         assumptions = dict(
             model="159338 SZ physical or optional creation cash substitution / SH cash substitution; research simulation",
             premium_threshold=str(settings.premium_threshold), threshold_comparison="strict > +threshold / < -threshold",
-            fees="0", slippage="0", fills="first strictly later permitted trading minute with an exact valid close",
+            fees=asdict(settings.fees), fee_policy="User-specified rates. No minimum commission. Round each fee component per actual fill to cents, half up. Investor fees are separate cash events; manager fees enter substitution refunds/payables once. No execution fees on unfilled close valuations, security transfers or fixed PCF substitution amounts. SecurityTradingRule fee metadata is not separately charged.",
+            signal_cost_policy="Estimate fees at currently observed prices, preserving the raw premium/discount trigger; estimated net edge is reported without adding an unrequested net-profit gate. Manager pending-value marks remain gross until actual proxy fills determine incurred fees.",
+            slippage="0", fills="first strictly later permitted trading minute with an exact valid close",
             liquidity="Own orders fill in full at exact permitted close in full-basket mode. max_shares_per_minute still applies to the separately scheduled manager proxy. Legacy partial-basket mode can be explicitly enabled; no volume data.",
             security_rule_policy=settings.security_rule_policy,
             creation_signal_gate="Positive-quantity real constituents that cannot be bought and forbid cash substitution block CREATE before signal emission. Zero-quantity rows and the aggregate cash placeholder do not block. REDEEM is unchanged.",
@@ -89,13 +100,15 @@ def make_full_runner(config, *, rules=None):
         (output / "assumptions.json").write_text(json.dumps(assumptions, ensure_ascii=False, indent=2, default=_text), encoding="utf-8")
         (output / "financial_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         _csv(output / "signals.csv", source.rows,
-             ["ts", "etf_close", "iopv", "premium", "side", "reason", "blocked_components", "component_reasons", "cash_substituted_components"])
+             ["ts", "etf_close", "iopv", "premium", "side", "reason", "blocked_components", "component_reasons", "cash_substituted_components", "estimated_fee", "estimated_net_edge"])
+        _csv(output / "fees.csv", executor.fee_rows,
+             ["ts", "trade_id", "order_id", "symbol", "side", "purpose", "turnover", "commission", "stamp_duty", "transfer_fee", "handling_fee", "total", "charged_to"])
         _csv(output / "creation_substitutions.csv", executor.creation_substitutions,
              ["ts", "trade_id", "symbol", "quantity", "price", "premium_rate", "deposit", "reason", "basis"])
         _csv(output / "orders.csv", [asdict(o) | {"remaining": o.remaining} for o in executor.orders],
-             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "cancelled", "paused", "manager_attempted_at", "last_block"])
+             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "fee", "cancelled", "paused", "manager_attempted_at", "last_block"])
         _csv(output / "fills.csv", executor.fills,
-             ["ts", "order_id", "trade_id", "symbol", "side", "quantity", "price", "purpose", "fee", "slippage", "basis"])
+             ["ts", "order_id", "trade_id", "symbol", "side", "quantity", "price", "purpose", "fee", "commission", "stamp_duty", "transfer_fee", "handling_fee", "slippage", "basis"])
         _csv(output / "cashflows.csv", account.rows,
              ["ts", "trade_id", "event", "cash_delta", "symbol", "quantity_delta", "cash_balance"])
         _csv(output / "cash_settlements.csv", [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs],
@@ -125,11 +138,12 @@ def make_full_runner(config, *, rules=None):
         settlement_rows = [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs]
         save_ledger_report(output / "report/ledger.html", trade_rows, account.rows,
                            executor.fills, settlement_rows, executor.substitution_pricing,
-                           executor.substitution_attempts, executor.creation_substitutions)
+                           executor.substitution_attempts, executor.creation_substitutions, executor.fee_rows)
         save_report(executor.equity_curve, resources.portfolio.to_closed_trades(), output / "report",
                     starting_cash=config.starting_cash,
                     trade_rows=resources.portfolio.to_rows(), financial_summary=summary,
-                    title="159338 Research simulation (fees=0, slippage=0; proxy cash settlement)",
+                    total_costs=fee_totals["total"],
+                    title="159338 Research simulation (configured fees, slippage=0; proxy cash settlement)",
                     peak_cash_usage=max(Decimal("0"), max((config.starting_cash - row["cash_balance"] for row in account.rows), default=Decimal("0"))),
                     filled_orders=sum(o.purpose != "MANAGER" and o.filled == o.quantity for o in executor.orders),
                     rejected_orders=sum(o.cancelled and o.purpose != "MANAGER" for o in executor.orders),

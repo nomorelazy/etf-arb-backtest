@@ -1,14 +1,15 @@
-"""Zero-fee, zero-slippage minute-close research execution and settlement.
+"""Configurable-fee, zero-slippage minute-close execution and settlement.
 
 This is not an exchange matching engine. Prices/volume/status and manager
 settlement assumptions are exported alongside every run.
 """
 
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time
 from decimal import Decimal
 
 from etf_arb.data.snapshot import component_symbol
+from etf_arb.costs import AssetType, TradeFeeModel
 from etf_arb.decision.basket import check_creation_basket
 from etf_arb.domain import Side
 from etf_arb.execution.plan import application_allowed, build_plan
@@ -33,6 +34,7 @@ class SimOrder:
     not_before_day: date
     filled: int = 0
     value: Decimal = ZERO
+    fee: Decimal = ZERO
     cancelled: bool = False
     last_block: str = ""
     paused: bool = False
@@ -59,6 +61,7 @@ class SimTrade:
 class ArbitrageSimulator:
     def __init__(self, prices, settings):
         self.prices, self.settings = prices, settings
+        self.fee_model = TradeFeeModel(settings.fees)
         self.account = None
         self.trades, self.orders, self.fills, self.rejections = [], [], [], []
         self.equity_curve, self.daily, self.marks = [], [], {}
@@ -71,6 +74,12 @@ class ArbitrageSimulator:
         self.substitution_pricing = []
         self.substitution_attempts = []
         self.creation_substitutions = []
+        self.fee_rows = []
+
+    def _fee_for(self, symbol, side, quantity, price):
+        return self.fee_model.calculate(
+            asset_type=AssetType.ETF if symbol == "159338.SZ" else AssetType.STOCK,
+            side=side, turnover=quantity * price)
 
     def available(self, at):
         return (not any(t.state != "CLOSED" for t in self.trades)
@@ -160,7 +169,7 @@ class ArbitrageSimulator:
             if bar is None:
                 reason = "missing_entry_quote"
                 break
-            needed += quantity * bar.close
+            needed += quantity * bar.close + self._fee_for(symbol, "BUY", quantity, bar.close).total
         if needed > self.account.cash:
             reason = "insufficient_cash"
         if reason:
@@ -211,26 +220,42 @@ class ArbitrageSimulator:
                 floor = max(trade.plan.estimated_cash, ZERO)
                 if trade.decision.side is Side.CREATE:
                     floor += trade.plan.substitution_deposit + trade.plan.domestic_fixed
-                if self.settings.assume_full_basket_fill and self.account.cash - floor < quantity * bar.close:
-                    raise ValueError(f"Full-basket assumption cannot be funded: {trade.trade_id}/{order.symbol}")
-                affordable = max(0, int((self.account.cash - floor) / bar.close))
-                quantity = min(quantity, affordable)
-                quantity = quantity // 100 * 100
+                available = max(ZERO, self.account.cash - floor)
+                if self.settings.assume_full_basket_fill:
+                    required = quantity * bar.close + self._fee_for(order.symbol, "BUY", quantity, bar.close).total
+                    if available < required:
+                        raise ValueError(f"Full-basket assumption cannot be funded: {trade.trade_id}/{order.symbol}")
+                else:
+                    low, high = 0, quantity // 100
+                    while low < high:
+                        mid = (low + high + 1) // 2
+                        needed = mid * 100 * bar.close + self._fee_for(order.symbol, "BUY", mid * 100, bar.close).total
+                        if needed <= available:
+                            low = mid
+                        else:
+                            high = mid - 1
+                    quantity = low * 100
             elif quantity < order.remaining:
                 quantity = quantity // 100 * 100
         if quantity <= 0:
             order.last_block = "insufficient_cash_or_lot_size"
             return
+        fees = self._fee_for(order.symbol, order.side, quantity, bar.close)
         if order.purpose != "MANAGER":
-            self.account.fill(context.now, trade.trade_id, order.symbol, order.side, quantity, bar.close)
+            self.account.fill(context.now, trade.trade_id, order.symbol, order.side, quantity, bar.close, fees=fees)
         order.filled += quantity
         order.value += quantity * bar.close
+        order.fee += fees.total
         order.last_block = ""
         self.marks[order.symbol] = bar.close
         self.fills.append(dict(ts=context.now, order_id=order.order_id, trade_id=trade.trade_id,
                                symbol=order.symbol, side=order.side, quantity=quantity, price=bar.close,
-                               purpose=order.purpose, fee=ZERO, slippage=ZERO,
+                               purpose=order.purpose, fee=fees.total, **asdict(fees), slippage=ZERO,
                                basis="manager_scheduled_close_proxy" if order.purpose == "MANAGER" else "next_minute_close"))
+        self.fee_rows.append(dict(ts=context.now, trade_id=trade.trade_id, order_id=order.order_id,
+            symbol=order.symbol, side=order.side, purpose=order.purpose,
+            turnover=quantity * bar.close, **asdict(fees), total=fees.total,
+            charged_to="cash_substitution" if order.purpose == "MANAGER" else "investor_cash"))
 
     def _fill_full_basket(self, trade, context):
         """Preflight every entry and all application cash before any leg fills.
@@ -256,7 +281,8 @@ class ArbitrageSimulator:
             if block or bar is None:
                 raise ValueError(f"Full-basket assumption lacks an executable entry: "
                                  f"{trade.trade_id}/{order.symbol}: {block or 'missing_exact_bar'}")
-            required += order.remaining * bar.close
+            required += (order.remaining * bar.close
+                         + self._fee_for(order.symbol, "BUY", order.remaining, bar.close).total)
         if required > self.account.cash:
             raise ValueError(f"Full-basket assumption cannot be funded: {trade.trade_id}; "
                              f"required={required}, available={self.account.cash}")
@@ -350,7 +376,10 @@ class ArbitrageSimulator:
         for symbol, required in trade.plan.manager.items():
             order = filled_by_symbol.get(symbol)
             filled = order.filled if order else 0
-            result += order.value if order else ZERO
+            if order:
+                result += order.value
+                if order.fee:
+                    result += order.fee if trade.decision.side is Side.CREATE else -order.fee
             if required > filled:
                 bar = self.prices.get(symbol, now)
                 if bar:
@@ -415,7 +444,12 @@ class ArbitrageSimulator:
                 trade.reason = "missing_substitution_deadline_close"
                 return  # Never replace a missing T+2 close with a future price.
             prices[order.order_id] = bar.close
-        value = trade.plan.manager_fixed + sum((o.value for o in self._orders(trade, "MANAGER")), ZERO)
+        fee_sign = 1 if trade.decision.side is Side.CREATE else -1
+        value = trade.plan.manager_fixed + sum(
+            (o.value for o in self._orders(trade, "MANAGER")), ZERO)
+        for order in self._orders(trade, "MANAGER"):
+            if order.fee:
+                value += fee_sign * order.fee
         for order in outstanding:
             quantity, price = order.remaining, prices[order.order_id]
             value += quantity * price

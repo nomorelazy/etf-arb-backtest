@@ -1,6 +1,7 @@
 """Cash/holdings projection. Cash flows, rather than signal edges, determine PnL."""
 
 from decimal import Decimal
+from etf_arb.costs import FeeBreakdown
 
 from etf_arb.portfolio.ledger import LedgerEvent, LedgerEventType
 
@@ -33,14 +34,31 @@ class CashAccount:
         self.rows.append(dict(ts=ts, trade_id=trade_id, event=kind.value, cash_delta=cash,
                               symbol=symbol, quantity_delta=quantity, cash_balance=self.cash))
 
-    def fill(self, ts, trade_id, symbol, side, quantity, price):
+    def fill(self, ts, trade_id, symbol, side, quantity, price, *, fees=None):
         if type(quantity) is not int or quantity <= 0 or not price.is_finite() or price <= 0:
             raise ValueError("Invalid fill quantity/price")
         if side not in {"BUY", "SELL"}:
             raise ValueError("Unknown fill side")
+        fees = FeeBreakdown() if fees is None else fees
+        if not isinstance(fees, FeeBreakdown):
+            raise TypeError("fees must be FeeBreakdown")
         sign = 1 if side == "BUY" else -1
+        # Validate the entire cash/quantity change before recording any leg.
+        if self.cash - sign * quantity * price - fees.total < 0:
+            raise ValueError("Insufficient cash including transaction fees")
+        if self.positions.get((trade_id, symbol), 0) + sign * quantity < 0:
+            raise ValueError("Insufficient shares; short selling is disabled")
         self.post(ts, trade_id, LedgerEventType.FILL, cash=-sign * quantity * price,
                   symbol=symbol, quantity=sign * quantity)
+        for field, event in (
+            ("commission", LedgerEventType.COMMISSION_PAID),
+            ("stamp_duty", LedgerEventType.STAMP_DUTY_PAID),
+            ("transfer_fee", LedgerEventType.TRANSFER_FEE_PAID),
+            ("handling_fee", LedgerEventType.HANDLING_FEE_PAID),
+        ):
+            amount = getattr(fees, field)
+            if amount:
+                self.post(ts, trade_id, event, cash=-amount, symbol=symbol)
 
     def holdings(self, trade_id):
         return {symbol: q for (tid, symbol), q in self.positions.items() if tid == trade_id and q}

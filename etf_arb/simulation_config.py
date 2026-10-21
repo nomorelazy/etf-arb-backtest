@@ -1,7 +1,8 @@
 """Explicit research assumptions for the first supported ETF execution model."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
+from etf_arb.costs import FeeRates
 from etf_arb.rules.frequency import TradeFrequencyRule
 from etf_arb.rules.trading_time import TradingTimeRule
 from etf_arb.rules.cash_substitution import CashSubstitutionTiming
@@ -24,8 +25,13 @@ class SimulationConfig:
     max_shares_per_minute: int | None = None
     security_rule_policy: str = "require"
     assume_full_basket_fill: bool = True
+    fees: FeeRates = field(default_factory=FeeRates)
 
     def __post_init__(self):
+        if isinstance(self.fees, dict):
+            object.__setattr__(self, "fees", FeeRates.from_dict(self.fees))
+        if not isinstance(self.fees, FeeRates):
+            raise TypeError("fees must be FeeRates or a fee settings object")
         threshold = None if self.premium_threshold is None else Decimal(str(self.premium_threshold))
         if threshold is not None and (not threshold.is_finite() or not 0 < threshold < 1):
             raise ValueError("premium_threshold must be a ratio between 0 and 1; set it explicitly for each run")

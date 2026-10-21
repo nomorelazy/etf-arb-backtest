@@ -207,6 +207,14 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                     f"已结清 {financial_summary['settled_count']} 笔，待完成 {financial_summary['pending_count']} 笔。</p>"
                     f"<p>本轮折溢价门槛：{Decimal(financial_summary['premium_threshold']):.4%}。"
                     "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
+        if 'fee_breakdown' in financial_summary:
+            details += (f"<h2>交易税费</h2><p>成交税费合计 {Decimal(financial_summary['fee']):,.2f} 元；"
+                        f"其中投资者账户扣款 {Decimal(financial_summary['investor_fees']):,.2f} 元，"
+                        f"代买卖费用 {Decimal(financial_summary['manager_fees']):,.2f} 元计入现金替代退补款。</p>")
+            from etf_arb.report.ledger import _table
+            names = {'commission': '佣金', 'stamp_duty': '印花税', 'transfer_fee': '过户费', 'handling_fee': '经手费'}
+            details += _table([{'费用项目': label, '金额（元）': financial_summary['fee_breakdown'][key]}
+                               for key, label in names.items()])
     if trade_rows is not None:
         from etf_arb.report.ledger import _table
         details += "<h2>已结清套利六列账本（按发起时间）</h2>" + _table(trade_rows)

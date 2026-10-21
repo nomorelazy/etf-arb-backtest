@@ -97,7 +97,7 @@ python -m etf_arb.cli backtest --config configs/full_flow.example.json --premium
 | `settlement/cash.py` | 按交易日处理现金替代款项和 PCF 现金差额 |
 | `portfolio/account.py` | 现金与持仓投影，禁止透支及卖空；按实际模拟现金流计算交易最终盈亏 |
 
-用户当前选择直接使用 close 简化成交，手续费和额外滑点均为零，不要求拆出另一套盘口正式运行。
+用户当前选择直接使用 close 简化成交，交易税费采用用户配置，额外滑点为零，不要求拆出另一套盘口正式运行。
 阈值由每次配置或命令行指定，不固定为 0.3% 或 0.4%。上面命令的 0.005 仅演示 0.5%；
 请替换为当次希望的比例值，或在 JSON 设置 `simulation.premium_threshold`。命令行值覆盖 JSON，
 两处均为空时明确报错，不自动选择旧门槛、不解释成零阈值。源信号继续保留可配置门槛的双向判断。
@@ -175,6 +175,7 @@ T/T+1 不执行这些代买卖；14:30 缺少精确 close 或规则禁止时不�
 `signals.csv`、`orders.csv`、`fills.csv`、`cashflows.csv`、`cash_settlements.csv`、`trades.csv`、
 `daily_account.csv`、`financial_summary.json`、`assumptions.json`、`portfolio_ledger.csv`、
 `substitution_pricing.csv`、`substitution_attempts.csv`、`creation_substitutions.csv`、`report/report.html` 和 `report/ledger.html`。
+税费另存 `fees.csv`；`fills.csv` 保留佣金、印花税、过户费、经手费和费用合计，`financial_summary.json` 与标准 HTML 显示总费用。
 Portfolio 保留旧 `TradeRecord`、`record_trade`、`record_settled_trade`、`to_rows`、`export_csv` 接口，
 同时支持交易生命周期和期间汇总。六列交易额度采用 ETF 腿实际成交额：申购为卖出 ETF 收入，
 赎回为买入 ETF 支出；交易单位输出 ETF 份数，不以 `quantity_units` 倍数代替。
@@ -182,6 +183,12 @@ Portfolio 保留旧 `TradeRecord`、`record_trade`、`record_settled_trade`、`t
 不再依赖 Temp 中的临时导出脚本。尚未结清的现金流不标成最终盈利或亏损。
 `report/report.html` 直接使用标准 `report.render.save_report` 模板生成，不在完整流程中追加或重写页面。
 复制到其他目录查看时，应将它与同目录的 `pnl_report.png` 一起复制。
+
+交易税费统一在 `etf_arb/costs/fees.py` 计算。当前默认按用户研究设置：股票佣金万1、过户费万1，买卖双向；股票卖出另收印花税万5。ETF佣金万0.5、经手费万0.4，买卖双向叠加。每笔成交、每个费用项目四舍五入到分，无最低佣金。对应100万元成交额，股票买入200元、卖出700元，ETF买入或卖出各90元。
+
+费率通过 `simulation.fees` 配置，样例见 `configs/full_flow.example.json`；五项费率显式设为零可复现此前零费实验，代码中可使用 `FeeRates.zero()`。此配置是完整模拟器唯一收费来源，不会再按证券规则中的费用元数据重复收费。
+投资者买入扣成交额及税费、卖出入账成交额减税费，账户分别记录四类费用；整篮预检先保证包括买入税费在内的足额资金。基金经理实际模拟成交的费用加入代买成本或扣减代卖收入，通过退补款体现，投资者现金不重复扣费。未成交部分的收盘估值、申赎划转和固定PCF现金替代金额不额外模拟证券交易税费。
+信号用当时可见价格估算费用并输出 `estimated_fee`、`estimated_net_edge`；原始 IOPV、折溢价及触发门槛保持独立，Engine仍只校验和分发。最终净盈亏由含费用现金流汇总；`save_report(total_costs=...)` 仅报告成本，不再次扣减盈亏。
 其中 `final_net_pnl` 回答“这段时间发起的套利最终共赚多少”；仍有未完成交易时返回空值，
 同时保留已完成部分 `settled_net_pnl`。`ending_equity` 包含未出售持仓和未结算应收应付款的估值，
 不等同于全部已实现盈亏。每天的陈旧持仓估值会在 `stale_marks` 列标记。
