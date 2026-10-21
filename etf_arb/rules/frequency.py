@@ -1,4 +1,4 @@
-"""Rolling elapsed-time limits on arbitrage starts, independent of order legs."""
+"""Rolling intervals anchored to actual arbitrage applications, not order legs."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -17,6 +17,11 @@ class TradeFrequencyRule:
             raise ValueError("max_trades_per_day must be null or a positive integer")
 
     def allows(self, at: datetime, *, last_started_at: datetime | None, started_today: int) -> bool:
+        """Check a candidate signal against the latest submitted application.
+
+        Keep the existing keyword API; the simulator supplies application times
+        and the count of actual applications for the optional daily limit.
+        """
         for ts in (at, last_started_at):
             if ts is not None and (not isinstance(ts, datetime) or ts.tzinfo is not None):
                 raise ValueError("Trade start timestamps must be naive Beijing datetimes")

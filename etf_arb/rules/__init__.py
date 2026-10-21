@@ -15,6 +15,8 @@ from etf_arb.rules.a_share import (
 )
 from etf_arb.rules.errors import RuleError, RuleNotFoundError, RuleOverlapError
 from etf_arb.rules.frequency import TradeFrequencyRule
+from etf_arb.rules.trading_time import TradingTimeRule
+from etf_arb.rules.cash_substitution import CashSubstitutionTiming
 from etf_arb.rules.models import ETFRule, RuleRepository, SecurityTradingRule
 from etf_arb.rules.repository import (
     HistoricalRuleRepository,
@@ -44,4 +46,6 @@ __all__ = [
     "RuleRepository",
     "SecurityTradingRule",
     "TradeFrequencyRule",
+    "TradingTimeRule",
+    "CashSubstitutionTiming",
 ]

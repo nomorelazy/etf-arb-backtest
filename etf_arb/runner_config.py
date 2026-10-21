@@ -9,6 +9,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from etf_arb.data.missing import ifind_minute_grid
+from etf_arb.costs import FeeRates
 from etf_arb.domain import Side, TradeDecision
 from etf_arb.engine.backtest import BacktestConfig
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
@@ -40,11 +41,13 @@ class RunnerConfig:
     rules_path: Path | None = None
     settlement_end_date: date | None = None
     simulation: SimulationConfig | None = None
+    settlement_business_days: tuple[date, ...] | None = None
+    cash_payment_dates_path: Path | None = None
 
     def __post_init__(self) -> None:
         engine = BacktestConfig(self.start_date, self.end_date, self.etf_codes)
         object.__setattr__(self, "etf_codes", engine.etf_codes)
-        for name in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path"):
+        for name in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "cash_payment_dates_path"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, Path(value).expanduser().resolve())
@@ -61,6 +64,11 @@ class RunnerConfig:
         if not any(day <= self.end_date for day in selected):
             raise RunnerConfigError("No trading days in the opening date interval")
         object.__setattr__(self, "trading_days", selected)
+        if self.settlement_business_days is not None:
+            business_days = tuple(self.settlement_business_days)
+            if not business_days or any(type(d) is not date for d in business_days) or tuple(sorted(set(business_days))) != business_days:
+                raise RunnerConfigError("settlement_business_days must be increasing unique dates")
+            object.__setattr__(self, "settlement_business_days", business_days)
         clocks = tuple(self.clock_times)
         if not clocks or any(not isinstance(t, time) or t.tzinfo is not None for t in clocks):
             raise RunnerConfigError("clock_times must contain naive Beijing-local times")
@@ -102,7 +110,7 @@ class RunnerConfig:
             for key in ("start_date", "end_date", "settlement_end_date"):
                 if values.get(key) is not None:
                     values[key] = date.fromisoformat(values[key])
-            for key in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path"):
+            for key in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "cash_payment_dates_path"):
                 if values.get(key) is not None:
                     source = Path(values[key]).expanduser()
                     values[key] = source if source.is_absolute() else config_path.parent / source
@@ -116,6 +124,17 @@ class RunnerConfig:
             if not isinstance(days, list):
                 raise RunnerConfigError("trading_days must be a date array or a calendar text-file path")
             values["trading_days"] = tuple(date.fromisoformat(day) for day in days)
+            if values.get("settlement_business_days") is not None:
+                business = values["settlement_business_days"]
+                if isinstance(business, str):
+                    business_path = Path(business)
+                    if not business_path.is_absolute():
+                        business_path = config_path.parent / business_path
+                    business = [line.strip() for line in business_path.read_text(encoding="utf-8-sig").splitlines()
+                                if line.strip() and not line.lstrip().startswith("#")]
+                if not isinstance(business, list):
+                    raise RunnerConfigError("settlement_business_days must be a date array or calendar path")
+                values["settlement_business_days"] = tuple(date.fromisoformat(day) for day in business)
             if not isinstance(values.get("etf_codes"), list):
                 raise RunnerConfigError("etf_codes must be an array")
             values["etf_codes"] = tuple(values["etf_codes"])
@@ -131,7 +150,7 @@ class RunnerConfig:
 
     def to_dict(self) -> dict[str, object]:
         def value(item):
-            if isinstance(item, SimulationConfig):
+            if isinstance(item, (SimulationConfig, FeeRates)):
                 return {key.name: value(getattr(item, key.name)) for key in fields(item)}
             if isinstance(item, (date, time)):
                 return item.isoformat()

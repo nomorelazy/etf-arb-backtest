@@ -17,12 +17,13 @@ from etf_arb.portfolio.ledger import PortfolioLedger
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
 from etf_arb.runner_config import RunnerConfig
 from etf_arb.simulation_config import SimulationConfig
+from etf_arb.costs import FeeRates
 from etf_arb.domain import Side
 from test_missing_data import write_market
 
 
 DAYS = (date(2025, 1, 2), date(2025, 1, 3), date(2025, 1, 6))
-CLOCKS = tuple(time(9, minute) for minute in range(30, 36)) + (time(15),)
+CLOCKS = tuple(time(9, minute) for minute in range(30, 36)) + (time(14,30),time(15))
 
 
 class FullFlowTests(unittest.TestCase):
@@ -37,7 +38,7 @@ class FullFlowTests(unittest.TestCase):
         self.config = RunnerConfig(DAYS[0], DAYS[0], ("159338",), self.pcf, self.market,
                                    self.root / "run", DAYS, starting_cash=D("10000"), mode="execute",
                                    clock_times=CLOCKS, settlement_end_date=DAYS[-1],
-                                   simulation=SimulationConfig(cash_substitution_lag=2, security_rule_policy="assume_tradable"))
+                                   simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56")), fees=FeeRates.zero()))
         self.write_pcfs()
 
     def write_pcfs(self, wrong_date=False):
@@ -57,7 +58,7 @@ class FullFlowTests(unittest.TestCase):
             <UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource><ComponentShare>0</ComponentShare><SubstituteFlag>2</SubstituteFlag>
             <CreationCashSubstitute>253</CreationCashSubstitute><RedemptionCashSubstitute>207</RedemptionCashSubstitute></Component>
             <Component><UnderlyingSecurityID>000001</UnderlyingSecurityID><UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
-            <ComponentShare>100</ComponentShare><SubstituteFlag>1</SubstituteFlag></Component>
+            <ComponentShare>100</ComponentShare><SubstituteFlag>1</SubstituteFlag><PremiumRatio>0.1</PremiumRatio></Component>
             <Component><UnderlyingSecurityID>600000</UnderlyingSecurityID><UnderlyingSecurityIDSource>101</UnderlyingSecurityIDSource>
             <ComponentShare>100</ComponentShare><SubstituteFlag>1</SubstituteFlag></Component>
             <Component><UnderlyingSecurityID>000002</UnderlyingSecurityID><UnderlyingSecurityIDSource>102</UnderlyingSecurityIDSource>
@@ -110,7 +111,7 @@ class FullFlowTests(unittest.TestCase):
     def test_full_cycle_can_reopen_opposite_direction_after_settlement(self):
         rows = [r for r in self.market_rows() if r[0].date() == DAYS[0]]
         rows += [r for r in self.market_rows(3.2, 3.1) if r[0].date() != DAYS[0]]
-        settings = replace(self.config.simulation, cash_substitution_lag=0, cash_difference_lag=0)
+        settings = replace(self.config.simulation, cash_substitution_pricing_days=0, cash_substitution_lag=0, cash_difference_lag=0)
         runner, summary = self.run_model(rows, replace(self.config, end_date=DAYS[1], simulation=settings))
         self.assertEqual([t.decision.side for t in runner.executor.trades], [Side.CREATE, Side.REDEEM])
         self.assertEqual(summary["settled_count"], 2)
@@ -167,19 +168,21 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(runner.executor.daily[0]["holdings_value"], D("410.0"))
         self.assertEqual(runner.executor.daily[0]["stale_marks"], "159338.SZ")
 
-    def test_partial_buys_unwind_next_day_and_never_use_yesterdays_pcf(self):
-        settings = replace(self.config.simulation, quantity_units=2, max_shares_per_minute=100)
+    def test_partial_buys_are_held_and_do_not_auto_resume_or_unwind(self):
+        settings = replace(self.config.simulation, quantity_units=2, max_shares_per_minute=100,
+                           assume_full_basket_fill=False)
         # Buy half the basket on T, then no later stock bars on T.
         rows = [r for r in self.market_rows() if not (
             r[1] == "000001.SZ" and r[0].date() == DAYS[0] and r[0].time() >= time(9, 32))]
         runner, summary = self.run_model(rows, replace(self.config, quality_check=False, simulation=settings))
         trade = runner.executor.trades[0]
-        self.assertEqual(trade.state, "CLOSED")
+        self.assertEqual(trade.state, "HELD_PENDING_POLICY")
         self.assertIsNone(trade.applied_at)
         self.assertEqual(trade.reason, "basket_incomplete_at_close")
-        self.assertEqual(D(summary["final_net_pnl"]), D("0"))
-        self.assertEqual([f["purpose"] for f in runner.executor.fills], ["ENTRY", "UNWIND"])
-        self.assertEqual(runner.executor.fills[1]["ts"].date(), DAYS[1])
+        self.assertIsNone(summary["final_net_pnl"])
+        self.assertEqual([f["purpose"] for f in runner.executor.fills], ["ENTRY"])
+        self.assertEqual(runner.executor.account.holdings(trade.trade_id), {"000001.SZ": 100})
+        self.assertTrue(runner.executor.orders[0].paused)
 
     def test_provided_suspension_blocks_sale_until_rule_allows_next_day(self):
         self.rules.add(SecurityTradingRule("159338.SZ", DAYS[0], DAYS[0], True, False))
@@ -188,19 +191,25 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(next(f for f in runner.executor.fills if f["purpose"] == "EXIT")["ts"].date(), DAYS[1])
 
     def test_partial_fills_complete_both_legs_and_reconcile(self):
-        settings = replace(self.config.simulation, quantity_units=2, max_shares_per_minute=100)
+        settings = replace(self.config.simulation, quantity_units=2, max_shares_per_minute=100,
+                           assume_full_basket_fill=False)
         runner, summary = self.run_model(config=replace(self.config, simulation=settings))
         self.assertEqual(D(summary["final_net_pnl"]), D("96"))
-        self.assertEqual([f["quantity"] for f in runner.executor.fills], [100] * 6)
-        self.assertTrue(all(o.filled == o.quantity for o in runner.executor.orders))
+        self.assertEqual([f["quantity"] for f in runner.executor.fills], [100] * 5)
+        self.assertTrue(all(o.filled == o.quantity for o in runner.executor.orders if o.purpose != "MANAGER"))
+        self.assertEqual(runner.executor.substitution_pricing[0]['quantity'],100)
         self.assertEqual(runner.executor.trades[0].applied_at.time(), time(9, 32))
 
     def test_future_entry_price_jump_does_not_borrow_reserved_cash(self):
         rows = [(ts, code, 1.1 if code == "000001.SZ" and ts.time() > time(9, 30) else price)
                 for ts, code, price in self.market_rows()]
-        runner, summary = self.run_model(rows, replace(self.config, starting_cash=D("383")))
+        write_market(self.market, rows)
+        runner = make_full_runner(replace(self.config, starting_cash=D("383")), rules=self.rules)
+        with self.assertRaisesRegex(ValueError, "Full-basket assumption cannot be funded"):
+            runner.run()
         self.assertFalse(runner.executor.fills)
-        self.assertEqual(D(summary["final_net_pnl"]), D("0"))
+        self.assertFalse(runner.executor.account.rows)
+        self.assertEqual(runner.state, "failed")
 
     def test_missing_manager_bars_stay_pending_with_flagged_estimates(self):
         rows = [row for row in self.market_rows() if not (
@@ -215,8 +224,10 @@ class FullFlowTests(unittest.TestCase):
         config = replace(self.config, simulation=replace(self.config.simulation, security_rule_policy="require"))
         runner, summary = self.run_model(config=config)
         self.assertFalse(runner.executor.fills)
-        self.assertEqual(D(summary["final_net_pnl"]), D("0"))
+        self.assertIsNone(summary["final_net_pnl"])
         self.assertEqual(runner.executor.orders[0].last_block, "missing_security_rule")
+        self.assertEqual(runner.executor.trades[0].plan.physical, {})
+        self.assertEqual(runner.executor.trades[0].plan.optional_creation_substitutions, {"000001.SZ": D("110.00")})
 
     def test_account_rejects_short_and_unfunded_fill_atomically(self):
         account = CashAccount(D("100"), PortfolioLedger())

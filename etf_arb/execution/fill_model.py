@@ -8,9 +8,8 @@ from typing import Protocol
 from etf_arb.domain import Quote, QuoteStatus
 from etf_arb.rules.a_share import (
     CONTINUOUS_AUCTION_SESSIONS,
-    is_a_share_rule_trading_time,
-    is_continuous_auction_time,
 )
+from etf_arb.rules.trading_time import TradingTimeRule
 from etf_arb.rules.models import RuleRepository
 
 from etf_arb.execution.models import (
@@ -42,17 +41,19 @@ class NextQuoteFillModel:
     delisting expiry, and direction restrictions are enforced before filling.
     """
 
-    def __init__(self, *, security_rules: RuleRepository | None = None) -> None:
+    def __init__(self, *, security_rules: RuleRepository | None = None,
+                 trading_times: TradingTimeRule | None = None) -> None:
         self._security_rules = security_rules
+        self._trading_times = TradingTimeRule() if trading_times is None else trading_times
 
     def execute(self, order: Order, market_data: tuple[Quote, ...]) -> ExecutionResult:
-        # Buy/sell orders can only execute during A-share continuous auction.
-        # This also blocks lunch break and the 14:57 closing call auction.
-        if not is_continuous_auction_time(order.submitted_at):
+        if order.submitted_at.tzinfo is not None:
+            raise ValueError("Order timestamps must be timezone-naive Beijing time")
+        if not self._trading_times.allows(order.submitted_at.time()):
             return ExecutionResult(
                 order=order,
                 status=ExecutionStatus.NO_FILL,
-                reason="Order submitted outside continuous-auction trading hours.",
+                reason="Order submitted outside configured trading windows.",
             )
 
         if self._security_rules is not None:
@@ -60,7 +61,7 @@ class NextQuoteFillModel:
                 order.security_code, order.submitted_at.date()
             )
             allowed = (
-                is_a_share_rule_trading_time(rule, order.submitted_at)
+                rule.is_trading_time(order.submitted_at.time())
                 and (
                     rule.can_buy() if order.side is OrderSide.BUY else rule.can_sell()
                 )
@@ -75,16 +76,18 @@ class NextQuoteFillModel:
         # Never fill an afternoon order using a quote from the morning,
         # a previous day, or outside the same continuous-auction session.
         clock = order.submitted_at.time()
-        session_start = next(
-            start
+        session_start = next((start
             for start, end in CONTINUOUS_AUCTION_SESSIONS
-            if start <= clock < end
-        )
+            if start <= clock <= end), None)
+        if session_start is None:
+            return ExecutionResult(order=order, status=ExecutionStatus.NO_FILL,
+                                   reason="No source quote session for the configured order time.")
         candidates = sorted(
             (
                 quote for quote in market_data
                 if quote.security_code == order.security_code
-                and is_continuous_auction_time(quote.ts)
+                and quote.ts.tzinfo is None
+                and any(start <= quote.ts.time() <= end for start, end in CONTINUOUS_AUCTION_SESSIONS)
                 and quote.ts.date() == order.submitted_at.date()
                 and quote.ts.time() >= session_start
                 and quote.ts <= order.submitted_at
@@ -123,7 +126,8 @@ class NextQuoteFillModel:
                 side=order.side,
                 quantity=order.quantity,
                 price=reference_price,
-                ts=quote.ts,
+                ts=order.submitted_at,
+                quote_ts=quote.ts,
             )
             return ExecutionResult(order=order, status=ExecutionStatus.FILLED, fills=(fill,))
 

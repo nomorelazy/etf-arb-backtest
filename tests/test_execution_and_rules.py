@@ -16,7 +16,7 @@ from etf_arb.rules import (
 
 class ExecutionAndRulesTests(unittest.TestCase):
     def test_next_quote_model_uses_latest_existing_ask_without_extra_slippage(self) -> None:
-        submitted = datetime(2025, 1, 2, 9, 30)
+        submitted = datetime(2025, 1, 2, 9, 35)
         order = Order("o-1", "159338", OrderSide.BUY, 100, submitted)
         older_quote = Quote(
             "159338",
@@ -47,7 +47,7 @@ class ExecutionAndRulesTests(unittest.TestCase):
         self.assertEqual(result.fills[0].ts, latest_quote.ts)
 
     def test_sell_uses_best_bid_without_extra_slippage_and_missing_quote_is_no_fill(self) -> None:
-        submitted = datetime(2025, 1, 2, 9, 31)
+        submitted = datetime(2025, 1, 2, 9, 36)
         order = Order("o-2", "159338", OrderSide.SELL, 100, submitted)
         result = NextQuoteFillModel().execute(
             order,
@@ -67,11 +67,13 @@ class ExecutionAndRulesTests(unittest.TestCase):
             ),
         )
         self.assertEqual(result.fills[0].price, Decimal("2.00"))
+        self.assertEqual(result.fills[0].ts, submitted)
+        self.assertEqual(result.fills[0].quote_ts, submitted - timedelta(seconds=30))
         no_fill = NextQuoteFillModel().execute(order, ())
         self.assertEqual(no_fill.status, ExecutionStatus.NO_FILL)
 
     def test_missing_book_side_does_not_fall_back_to_last_price(self) -> None:
-        submitted = datetime(2025, 1, 2, 9, 30)
+        submitted = datetime(2025, 1, 2, 9, 35)
         order = Order("o-3", "159338", OrderSide.BUY, 100, submitted)
         result = NextQuoteFillModel().execute(
             order,
@@ -86,7 +88,7 @@ class ExecutionAndRulesTests(unittest.TestCase):
         )
         self.assertEqual(result.status, ExecutionStatus.NO_FILL)
 
-    def test_only_continuous_auction_orders_can_fill(self):
+    def test_only_user_window_orders_can_fill(self):
         day = (2025, 1, 2)
         model = NextQuoteFillModel()
         quotes = (
@@ -100,8 +102,8 @@ class ExecutionAndRulesTests(unittest.TestCase):
             ),
         )
         for hour, minute in (
-            (9, 29), (11, 30), (12, 0), (12, 59),
-            (14, 57), (15, 0),
+            (9, 29), (9, 30), (9, 34), (11, 28), (11, 30), (12, 0), (12, 59),
+            (14, 58), (15, 0),
         ):
             with self.subTest(at=(hour, minute)):
                 order = Order(
@@ -124,6 +126,8 @@ class ExecutionAndRulesTests(unittest.TestCase):
         self.assertEqual(
             model.execute(afternoon, quotes).fills[0].price, Decimal("1.02")
         )
+        last_minute = Order("last", "159338", OrderSide.BUY, 100, datetime(*day, 14, 57))
+        self.assertEqual(model.execute(last_minute, quotes).status, ExecutionStatus.FILLED)
 
     def test_afternoon_order_cannot_use_morning_or_lunch_quote(self):
         day = (2025, 1, 2)

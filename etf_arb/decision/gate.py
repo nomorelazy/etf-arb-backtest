@@ -1,4 +1,4 @@
-"""Environment 与 Condition 合并后的唯一交易决策入口。"""
+"""Environment 与 Condition 的联合校验接口；自动折溢价信号源见 premium。"""
 
 from __future__ import annotations
 
