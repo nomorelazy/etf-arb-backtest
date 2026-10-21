@@ -1,6 +1,6 @@
 """159338 SZSE cross-market routing; the 159900 row is an aggregate deposit."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 
 from etf_arb.data.snapshot import component_symbol
@@ -20,9 +20,10 @@ class ArbitragePlan:
     domestic_fixed: Decimal
     estimated_cash: Decimal
     etf_shares: int
+    optional_creation_substitutions: dict[str, Decimal] = field(default_factory=dict)
 
 
-def build_plan(pcf: PCF, side: Side, units: int) -> ArbitragePlan:
+def build_plan(pcf: PCF, side: Side, units: int, *, creation_cash_substitutions=None) -> ArbitragePlan:
     if pcf.etf_code != "159338":
         raise ValueError("Full-flow execution currently supports only 159338")
     if type(units) is not int or units < 1:
@@ -33,6 +34,10 @@ def build_plan(pcf: PCF, side: Side, units: int) -> ArbitragePlan:
     if pcf.estimated_cash_component is None:
         raise ValueError("PCF has no estimated cash component")
     physical, manager, placeholders = {}, {}, []
+    selected = dict(creation_cash_substitutions or {})
+    optional_cash = {}
+    if selected and side is not Side.CREATE:
+        raise ValueError("Optional SZ substitution is only supported for creation")
     manager_fixed = domestic_fixed = ZERO
     amount_name = "creation_cash_substitute" if side is Side.CREATE else "redemption_cash_substitute"
 
@@ -49,6 +54,8 @@ def build_plan(pcf: PCF, side: Side, units: int) -> ArbitragePlan:
             continue
         symbol = component_symbol(component)
         kind = _normalize_substitution_flag(component.substitution_flag)
+        if component.quantity == 0 and kind is not SubstitutionKind.MANDATORY:
+            continue
         if component.market_code == "101":
             has_sh = True
             if kind is SubstitutionKind.FORBIDDEN:
@@ -60,6 +67,14 @@ def build_plan(pcf: PCF, side: Side, units: int) -> ArbitragePlan:
         elif kind is SubstitutionKind.MANDATORY:
             domestic_fixed += amount(component)
             continue
+        elif symbol in selected:
+            if kind is not SubstitutionKind.ALLOWED:
+                raise ValueError(f"Cash substitution forbidden: {symbol}")
+            value = Decimal(str(selected.pop(symbol)))
+            if not value.is_finite() or value <= 0:
+                raise ValueError(f"Missing/invalid optional substitution deposit: {symbol}")
+            optional_cash[symbol] = value * units
+            target = manager
         else:
             target = physical
         quantity = component.quantity * units
@@ -73,9 +88,12 @@ def build_plan(pcf: PCF, side: Side, units: int) -> ArbitragePlan:
             target[symbol] = int(quantity)
     if len(placeholders) > 1 or (has_sh and len(placeholders) != 1):
         raise ValueError("Cross-market PCF must have exactly one aggregate cash placeholder")
+    if selected:
+        raise ValueError(f"Invalid optional cash-substitution components: {','.join(selected)}")
     deposit = amount(placeholders[0]) if placeholders else ZERO
+    deposit += sum(optional_cash.values(), ZERO)
     return ArbitragePlan(physical, manager, manager_fixed, deposit, domestic_fixed,
-                         pcf.estimated_cash_component * units, pcf.creation_unit * units)
+                         pcf.estimated_cash_component * units, pcf.creation_unit * units, optional_cash)
 
 
 def application_allowed(pcf, rule, side, units, at):

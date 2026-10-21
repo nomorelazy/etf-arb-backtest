@@ -52,6 +52,7 @@ class Fill:
     price: Decimal
     ts: datetime
     fee: Decimal = Decimal("0")
+    quote_ts: datetime | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "order_id", str(self.order_id).strip())

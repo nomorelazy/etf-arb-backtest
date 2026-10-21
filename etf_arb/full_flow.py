@@ -10,6 +10,7 @@ from etf_arb.data.snapshot import DailyCloseCache
 from etf_arb.decision.premium import PremiumDiscountSource
 from etf_arb.execution.simulator import ArbitrageSimulator
 from etf_arb.report.render import save_report
+from etf_arb.report.ledger import save_ledger_report
 from etf_arb.runner import BacktestRunner, RunnerConfigError, RunnerHooks
 
 
@@ -38,6 +39,8 @@ def make_full_runner(config, *, rules=None):
         period = resources.portfolio.summarize_pnl(config.start_date, config.end_date)
         summary = dict(
             premium_threshold=str(settings.premium_threshold),
+            blocked_trade_minutes=list(settings.blocked_trade_minutes),
+            trading_sessions=[list(pair) for pair in settings.trading_sessions],
             settlement_basis="research_proxy", opened_count=period.opened_count,
             settled_count=period.settled_count, pending_count=period.pending_count,
             settled_net_pnl=str(period.settled_net_pnl),
@@ -48,6 +51,9 @@ def make_full_runner(config, *, rules=None):
             fill_count=sum(f["purpose"] != "MANAGER" for f in executor.fills),
             manager_proxy_fill_count=sum(f["purpose"] == "MANAGER" for f in executor.fills),
             rejected_decision_count=len(executor.rejections),
+            held_pending_policy_count=sum(t.state == "HELD_PENDING_POLICY" for t in executor.trades),
+            assume_full_basket_fill=settings.assume_full_basket_fill,
+            priced_unpaid_cash_legs=sum(leg.final is not None and not leg.paid for t in executor.trades for leg in t.legs),
         )
         # Reconcile all actual model cash flows to the ledger and the starting balance.
         if account.cash - account.starting_cash != sum(account.trade_cash.values(), Decimal("0")):
@@ -56,69 +62,79 @@ def make_full_runner(config, *, rules=None):
             if account.cash - account.starting_cash != period.settled_net_pnl:
                 raise AssertionError("Closed trade PnL reconciliation failed")
         assumptions = dict(
-            model="159338 SZ physical / SH cash substitution; research simulation",
+            model="159338 SZ physical or optional creation cash substitution / SH cash substitution; research simulation",
             premium_threshold=str(settings.premium_threshold), threshold_comparison="strict > +threshold / < -threshold",
-            fees="0", slippage="0", fills="first strictly later continuous-auction minute with an exact valid close",
-            liquidity="unlimited at each close unless max_shares_per_minute is configured; no volume data",
+            fees="0", slippage="0", fills="first strictly later permitted trading minute with an exact valid close",
+            liquidity="Own orders fill in full at exact permitted close in full-basket mode. max_shares_per_minute still applies to the separately scheduled manager proxy. Legacy partial-basket mode can be explicitly enabled; no volume data.",
             security_rule_policy=settings.security_rule_policy,
+            creation_signal_gate="Positive-quantity real constituents that cannot be bought and forbid cash substitution block CREATE before signal emission. Zero-quantity rows and the aggregate cash placeholder do not block. REDEEM is unchanged.",
+            optional_sz_creation_substitution="When a SZ allowed constituent cannot be bought at the signal time, fund current exact minute close * shares * (1 + PCF creation premium). This user-selected research formula is not the prospectus ex-rights-adjusted previous-close reference. Missing close/premium leaves the creation unavailable. Deposit is funded once; the manager proxy and refund/supplement use the existing T+2 pricing and separate actual-payment process.",
             status_limitations="No historical bid/ask, volume, suspension master or adjusted daily price limits supplied. Missing bars never fill. Supplied dated security rules are enforced.",
             applications="Assume successful immediate confirmation once the full PCF consideration is available before cutoff; received assets may sell on a later minute",
-            failed_basket="Cancel unfilled entry at day close; unwind purchased securities no earlier than the next supplied trading day",
+            failed_basket=("User assumes all baskets can be completed. Preflight all entry quotes, rules, application permission and full cash before any leg fills; own orders are not size-capped or reduced to affordable partial lots. Contradictory inputs fail the run, without creating partial holdings or HELD_PENDING_POLICY." if settings.assume_full_basket_fill else "Explicit legacy partial-basket experiment: keep acquired securities and the unfinished cycle; pause remaining entry orders pending an explicit disposition policy. No automatic unwind or next-day application with yesterday's PCF."),
             funding="No borrowing/shorting; positive estimated cash is funded upfront for both directions, refunded/adjusted with the actual cash component",
             cash_placeholder="159900 charged once as SH aggregate; SH disclosed rows are not investor physical positions",
-            manager_execution="SH allowed substitution uses simulated manager trades on strictly later minute closes, zero costs; no actual fund-manager execution or refund records are available",
-            substitution_payment=f"Aggregate net refund (CREATE) / proceeds (REDEEM) no earlier than application + {settings.cash_substitution_lag} supplied trading days and completion of all manager proxy orders. Provisional redemption cash is not made available early.",
-            cash_difference=f"Subsequent PCF CashComponent matched only via PreTradingDay; payment {settings.cash_difference_lag} supplied trading days after publication. Tail horizon exhaustion leaves a pending leg.",
+            manager_execution=f"User research policy: one cash-substitution buy/sell attempt at {settings.cash_substitution_attempt_time} on application + {settings.cash_substitution_pricing_days} supplied trading days, using the exact current close and supplied trading constraints. No earlier or later minute retries. This is not a prospectus-mandated execution time.",
+            substitution_pricing=f"Ordinary research case: at most {settings.cash_substitution_pricing_days} supplied trading days after application; unfilled proxy quantities valued only at the exact deadline-day 15:00 close. This is valuation, not an investor fill. Missing deadline close leaves pricing unresolved. Individual suspended-day extensions, corporate actions and the 20-day special case require additional historical inputs.",
+            substitution_payment="Pricing, notice and payment are separate. Explicit business calendar determines notice/bound dates; only a supplied payment timestamp credits cash. Missing payment date stays unpaid. An explicitly configured non-null cash_substitution_lag is a research override, not a prospectus payment guarantee.",
+            cash_difference="Subsequent PCF CashComponent matched only via PreTradingDay. Default payment requires a supplied timestamp; a non-null cash_difference_lag is an explicit research override.",
             scheduling=f"One active cycle including pending settlement; rolling {settings.min_trade_interval_minutes} minutes between arbitrage starts; daily cap={settings.max_trades_per_day} (None means no daily cap). CREATE and REDEEM share the quota; constituent orders do not consume it.",
             valuation="Cash + holdings at latest observed close + unsettled receivables/payables; stale holdings marks flagged in daily_account.csv",
             calendar="Explicit supplied calendar. See configuration/source notes; no weekday approximation.",
             settings=asdict(settings),
+            blocked_trade_minutes=list(settings.blocked_trade_minutes),
+            trading_sessions=[list(pair) for pair in settings.trading_sessions],
+            blocked_minute_policy="No signal starts, applications, fills or scheduled model cash payments at a blocked clock minute. Pending work waits for a later allowed minute.",
         )
         (output / "assumptions.json").write_text(json.dumps(assumptions, ensure_ascii=False, indent=2, default=_text), encoding="utf-8")
         (output / "financial_summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-        _csv(output / "signals.csv", source.rows, ["ts", "etf_close", "iopv", "premium", "side", "reason"])
+        _csv(output / "signals.csv", source.rows,
+             ["ts", "etf_close", "iopv", "premium", "side", "reason", "blocked_components", "component_reasons", "cash_substituted_components"])
+        _csv(output / "creation_substitutions.csv", executor.creation_substitutions,
+             ["ts", "trade_id", "symbol", "quantity", "price", "premium_rate", "deposit", "reason", "basis"])
         _csv(output / "orders.csv", [asdict(o) | {"remaining": o.remaining} for o in executor.orders],
-             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "cancelled", "last_block"])
+             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "cancelled", "paused", "manager_attempted_at", "last_block"])
         _csv(output / "fills.csv", executor.fills,
              ["ts", "order_id", "trade_id", "symbol", "side", "quantity", "price", "purpose", "fee", "slippage", "basis"])
         _csv(output / "cashflows.csv", account.rows,
              ["ts", "trade_id", "event", "cash_delta", "symbol", "quantity_delta", "cash_balance"])
         _csv(output / "cash_settlements.csv", [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs],
-             ["trade_id", "kind", "estimate", "final", "known_on", "due", "paid"])
+             ["trade_id", "kind", "estimate", "final", "known_on", "pricing_deadline", "attempt_scheduled_at", "priced_at", "notice_due_on", "latest_payment_on", "due", "payment_at", "paid_at", "paid", "pricing_basis", "payment_basis"])
+        _csv(output / "substitution_pricing.csv", executor.substitution_pricing,
+             ["trade_id", "symbol", "quantity", "price", "ts", "basis"])
+        _csv(output / "substitution_attempts.csv", executor.substitution_attempts,
+             ["trade_id", "order_id", "symbol", "ts", "side", "requested_quantity", "filled_quantity", "unfilled_quantity", "result", "reason"])
         _csv(output / "daily_account.csv", executor.daily,
              ["date", "cash", "receivables", "holdings_value", "equity", "stale_marks", "stale_cash_substitution"])
         _csv(output / "rejections.csv", executor.rejections, ["ts", "reason"])
         trade_by_id = {t.trade_id: t for t in executor.trades}
-        _csv(output / "trades.csv", [dict(trade_id=t.trade_id, opened_at=t.opened_at, settled_at=t.settled_at,
+        trade_rows = [dict(trade_id=t.trade_id, opened_at=t.opened_at, settled_at=t.settled_at,
              side=trade_by_id[t.trade_id].decision.side.value, state=trade_by_id[t.trade_id].state,
              quantity_units=trade_by_id[t.trade_id].decision.quantity_units,
+             etf_shares=trade_by_id[t.trade_id].plan.etf_shares,
+             etf_leg_amount=t.amount,
              pcf_path=trade_by_id[t.trade_id].pcf.source_path,
              substitution_deposit=trade_by_id[t.trade_id].plan.substitution_deposit,
              domestic_fixed_cash=trade_by_id[t.trade_id].plan.domestic_fixed,
              estimated_cash=trade_by_id[t.trade_id].plan.estimated_cash,
-             net_pnl=t.pnl, reason=trade_by_id[t.trade_id].reason) for t in resources.portfolio.trades],
-             ["trade_id", "opened_at", "settled_at", "side", "quantity_units", "state", "net_pnl", "reason",
+             net_pnl=t.pnl, reason=trade_by_id[t.trade_id].reason) for t in resources.portfolio.trades]
+        _csv(output / "trades.csv", trade_rows,
+             ["trade_id", "opened_at", "settled_at", "side", "quantity_units", "etf_shares", "etf_leg_amount", "state", "net_pnl", "reason",
               "pcf_path", "substitution_deposit", "domestic_fixed_cash", "estimated_cash"])
+        resources.portfolio.export_csv(output / "portfolio_ledger.csv")
+        settlement_rows = [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs]
+        save_ledger_report(output / "report/ledger.html", trade_rows, account.rows,
+                           executor.fills, settlement_rows, executor.substitution_pricing,
+                           executor.substitution_attempts, executor.creation_substitutions)
         save_report(executor.equity_curve, resources.portfolio.to_closed_trades(), output / "report",
                     starting_cash=config.starting_cash,
+                    trade_rows=resources.portfolio.to_rows(), financial_summary=summary,
                     title="159338 Research simulation (fees=0, slippage=0; proxy cash settlement)",
                     peak_cash_usage=max(Decimal("0"), max((config.starting_cash - row["cash_balance"] for row in account.rows), default=Decimal("0"))),
                     filled_orders=sum(o.purpose != "MANAGER" and o.filled == o.quantity for o in executor.orders),
-                    rejected_orders=sum(o.cancelled for o in executor.orders),
+                    rejected_orders=sum(o.cancelled and o.purpose != "MANAGER" for o in executor.orders),
                     failed_applications=sum(t.reason in {"basket_incomplete_at_close", "application_cutoff_or_disabled", "insufficient_application_cash"} for t in executor.trades))
-        # Put the model basis and pending totals in the HTML itself, not just in sidecar files.
-        path = output / "report" / "report.html"
-        html = path.read_text(encoding="utf-8")
-        notice = ("<aside style='padding:18px;background:#fff3cd;color:#332600'><strong>研究模拟：费用=0，滑点=0；现金替代按分钟行情模拟基金经理交易。</strong>"
-                  f"<p>触发阈值 ±{(settings.premium_threshold * 100).normalize()}%；信号区间 {config.start_date} 至 {config.end_date}，结算尾期至 {config.settlement_end_date}。</p>"
-                  f"<p>发起间隔至少 {settings.min_trade_interval_minutes} 分钟；每日次数上限：{settings.max_trades_per_day if settings.max_trades_per_day is not None else '无'}；上一笔全部结算完成后才发起下一笔。</p>"
-                  f"<p>发起 {period.opened_count} 笔；完成 {period.settled_count} 笔；待完成 {period.pending_count} 笔。"
-                  f"已完成净盈亏 {period.settled_net_pnl}；区间最终净盈亏 "
-                  f"{period.final_net_pnl if period.final_net_pnl is not None else '待结算，暂不能确定'}。</p>"
-                  "<p>下方曲线包含持仓及未结算款项的估值。基金经理实际交易和退补款记录尚未接入。"
-                  "详见 <a href='../assumptions.json'>假设说明</a>。</p></aside>")
-        start = html.find(">", html.find("<body")) + 1
-        path.write_text(html[:start] + notice + html[start:], encoding="utf-8")
+        # report.html is owned by the standard renderer; do not rewrite its template.
         return summary
 
     return BacktestRunner(config, source=source, executor=executor,

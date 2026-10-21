@@ -11,13 +11,20 @@
   "mode": "execute",
   "quality_check": true,
   "rules_path": "research_rules.example.json",
+  "settlement_business_days": null,
+  "cash_payment_dates_path": null,
   "simulation": {
-    "premium_threshold": "0.004",
+    "premium_threshold": null,
     "quantity_units": 1,
     "max_trades_per_day": null,
     "min_trade_interval_minutes": 60,
-    "cash_substitution_lag": 3,
-    "cash_difference_lag": 1,
-    "security_rule_policy": "assume_tradable"
+    "blocked_trade_minutes": ["09:30"],
+    "trading_sessions": [["09:35", "11:27"], ["13:00", "14:57"]],
+    "cash_substitution_pricing_days": 2,
+    "cash_substitution_attempt_time": "14:30",
+    "cash_substitution_lag": null,
+    "cash_difference_lag": null,
+    "security_rule_policy": "assume_tradable",
+    "assume_full_basket_fill": true
   }
 }

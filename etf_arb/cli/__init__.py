@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -45,6 +46,8 @@ def build_parser() -> argparse.ArgumentParser:
         "backtest", help="run decision replay or the configured full-flow research simulation"
     )
     backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
+    backtest_parser.add_argument("--premium-threshold", type=Decimal,
+                                 help="override signal threshold as a ratio (e.g. 0.005 means 0.5%%)")
 
     report_parser = subparsers.add_parser("report", help="build an HTML/PNG report from backtest CSV files")
     report_parser.add_argument("--equity", required=True, help="CSV with date,equity columns")
@@ -108,6 +111,10 @@ def main() -> int:
 
         try:
             config = RunnerConfig.from_json(args.config)
+            if args.premium_threshold is not None:
+                if config.simulation is None:
+                    raise ValueError("--premium-threshold requires a simulation configuration")
+                config = replace(config, simulation=replace(config.simulation, premium_threshold=args.premium_threshold))
             runner = make_full_runner(config) if config.simulation is not None else BacktestRunner(config)
             result = runner.run()
         except (RunnerError, ValueError, TypeError, OSError) as error:

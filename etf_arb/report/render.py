@@ -6,6 +6,7 @@ import csv
 from dataclasses import fields
 from decimal import Decimal
 from pathlib import Path
+from html import escape
 from typing import Sequence
 
 from etf_arb.report.metrics import calculate_summary
@@ -94,6 +95,8 @@ def save_report(
     rejected_orders: int = 0,
     failed_applications: int = 0,
     title: str = "ETF Arbitrage Backtest",
+    trade_rows: Sequence[dict] | None = None,
+    financial_summary: dict | None = None,
 ) -> BacktestSummary:
     """输出 metrics.csv、equity.csv 和 pnl_report.png。"""
     import matplotlib
@@ -165,11 +168,12 @@ def save_report(
     chart_path = output / "pnl_report.png"
     fig.savefig(chart_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
-    _save_html(summary, output / "report.html", chart_path.name)
+    _save_html(summary, output / "report.html", chart_path.name,
+               trade_rows=trade_rows, financial_summary=financial_summary)
     return summary
 
 
-def _save_html(summary: BacktestSummary, path: Path, chart_name: str) -> None:
+def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None) -> None:
     labels = {
         "total_return": "区间收益率",
         "annualized_return": "年化收益率",
@@ -195,6 +199,23 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str) -> None:
     rows = "\n".join(
         f"<tr><th>{labels[key]}</th><td>{values[key]}</td></tr>" for key in labels
     )
+    details = ""
+    if financial_summary is not None:
+        final = financial_summary['final_net_pnl']
+        final_text = "待全部结清后确定" if final is None else f"{Decimal(final):,.2f} 元"
+        details += (f"<h2>发起期间的最终盈亏</h2><p>{escape(final_text)}；"
+                    f"已结清 {financial_summary['settled_count']} 笔，待完成 {financial_summary['pending_count']} 笔。</p>"
+                    f"<p>本轮折溢价门槛：{Decimal(financial_summary['premium_threshold']):.4%}。"
+                    "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
+    if trade_rows is not None:
+        from etf_arb.report.ledger import _table
+        details += "<h2>已结清套利六列账本（按发起时间）</h2>" + _table(trade_rows)
+        quality = ('<a href="../quality/summary.json">数据缺失检查</a>'
+                   if (path.parent.parent / 'quality/summary.json').is_file()
+                   else '本轮未执行缺失检查')
+        details += ('<p><a href="ledger.html">逐笔全部现金、证券、成交及结算账目（可打印）</a> | '
+                    + quality + ' | '
+                    '<a href="../assumptions.json">本轮配置与假设</a></p>')
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
@@ -211,6 +232,7 @@ th {{ background: #f4f6f8; }} img {{ width: 100%; height: auto; }}
 <table><tbody>{rows}</tbody></table>
 <img src="{chart_name}" alt="累计 PnL 与回撤图">
 <p class="note">基于日频账户总权益和已平仓套利交易计算。最大回撤以正数表示回撤幅度；盈亏比为平均盈利除以平均亏损绝对值；未平仓交易不计入胜率和盈亏比。</p>
+{details}
 </html>
 """
     path.write_text(document, encoding="utf-8")

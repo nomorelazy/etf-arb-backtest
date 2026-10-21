@@ -36,7 +36,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from enum import Enum
-from typing import Mapping
+from typing import Callable, Mapping
 
 from etf_arb.domain import PCF, PCFComponent, Quote
 from etf_arb.pricing.errors import PricingDataError
@@ -281,6 +281,8 @@ def calculate_iopv_159338(
     pcf: PCF,
     quotes: Mapping[str, Quote],
     at: datetime,
+    *,
+    session_validator: Callable[[datetime], bool] = is_continuous_auction_time,
 ) -> IOPVValuation:
     """计算 159338 T 日指定时刻的盘中 IOPV。
 
@@ -288,7 +290,8 @@ def calculate_iopv_159338(
         - T 日 PCF；
         - T 日 at 时刻及之前的最新行情。
 
-    不使用任何 T+1/T+2 价格。
+    不使用任何 T+1/T+2 价格。模拟器可显式传入用户交易时段校验器；
+    日期、行情时间及其他数据校验保持不变。
     """
 
     # ============================================================
@@ -328,9 +331,9 @@ def calculate_iopv_159338(
     # 4. 只允许连续竞价时间
     # ============================================================
 
-    if not is_continuous_auction_time(at):
+    if not session_validator(at):
         raise ValueError(
-            f"{at} is outside A-share continuous auction sessions."
+            f"{at} is outside the configured valuation sessions."
         )
 
     # ============================================================

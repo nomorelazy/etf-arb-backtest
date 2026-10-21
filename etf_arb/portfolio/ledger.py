@@ -6,12 +6,18 @@
 
 from __future__ import annotations
 
+import csv
+from pathlib import Path
 from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
 from etf_arb.report.models import ClosedTrade
+from etf_arb.domain import Side
+from etf_arb.portfolio.trade_record import TradeRecord
+
+TRADE_COLUMNS = ("时间", "交易类型", "交易额度（元）", "交易单位（ETF份）", "交易结果", "交易盈亏（元）")
 
 
 class LedgerEventType(str, Enum):
@@ -23,6 +29,7 @@ class LedgerEventType(str, Enum):
     SECURITIES_AVAILABLE = "SECURITIES_AVAILABLE"
     CASH_SETTLED = "CASH_SETTLED"
     CASH_SUBSTITUTION_SETTLED = "CASH_SUBSTITUTION_SETTLED"
+    TRADE_HELD = "TRADE_HELD"
 
 
 @dataclass(frozen=True)
@@ -43,6 +50,9 @@ class ArbitrageTrade:
     opened_at: datetime
     settled_at: datetime | None = None
     pnl: Decimal | None = None
+    side: Side | None = None
+    amount: Decimal | None = None
+    etf_shares: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.trade_id, str) or not self.trade_id.strip():
@@ -109,6 +119,7 @@ class PortfolioLedger:
         init=False,
         repr=False,
     )
+    _records: dict[str, TradeRecord] = field(default_factory=dict, init=False, repr=False)
 
     def record(self, event: LedgerEvent) -> None:
         """保留现有事件流水接口。"""
@@ -123,13 +134,17 @@ class PortfolioLedger:
         *,
         trade_id: str,
         opened_at: datetime,
+        side: Side | None = None,
+        etf_shares: int | None = None,
     ) -> None:
         """套利发起时立即登记，包括之后可能跨日未完成的交易。"""
         trade = ArbitrageTrade(
             trade_id=trade_id,
             opened_at=opened_at,
+            side=side,
+            etf_shares=etf_shares,
         )
-        if trade.trade_id in self._trades:
+        if trade.trade_id in self._entries():
             raise ValueError(f"交易已登记：{trade.trade_id}")
         self._trades[trade.trade_id] = trade
 
@@ -139,6 +154,7 @@ class PortfolioLedger:
         trade_id: str,
         settled_at: datetime,
         pnl: Decimal,
+        amount: Decimal | None = None,
     ) -> None:
         """全部交易腿及最终现金结算完成后，由执行/结算模块调用。"""
         if settled_at is None or pnl is None:
@@ -152,20 +168,72 @@ class PortfolioLedger:
             raise ValueError(f"交易已完成结算：{trade_id}")
 
         # replace 会重新执行 ArbitrageTrade 的字段校验。
-        self._trades[trade.trade_id] = replace(
+        completed = replace(
             trade,
             settled_at=settled_at,
             pnl=pnl,
+            amount=amount,
         )
+        record = None
+        if completed.side is not None and amount is not None and completed.etf_shares is not None:
+            record = TradeRecord(ts=trade.opened_at, side=completed.side, amount=amount,
+                                 etf_shares=completed.etf_shares, net_pnl=pnl,
+                                 settled_at=settled_at, trade_id=trade_id)
+        self._trades[trade_id] = completed
+        if record is not None:
+            self._records[trade_id] = record
 
     @property
-    def trades(self) -> tuple[ArbitrageTrade, ...]:
+    def trades(self) -> tuple[ArbitrageTrade | TradeRecord, ...]:
         return tuple(
-            sorted(
-                self._trades.values(),
-                key=lambda trade: (trade.opened_at, trade.trade_id),
-            )
+            self._records.get(trade.trade_id, trade)
+            if isinstance(trade, ArbitrageTrade) else trade
+            for trade in sorted(self._entries().values(), key=lambda trade: trade.opened_at)
         )
+
+    def _entries(self):
+        return self._trades | {key: record for key, record in self._records.items() if key not in self._trades}
+
+    def record_trade(self, trade: TradeRecord) -> None:
+        """Preserve the original six-column completed-result input API."""
+        if not isinstance(trade, TradeRecord):
+            raise TypeError("trade must be a TradeRecord.")
+        trade_id = trade.trade_id or f"L{len(self._entries())+1:07}"
+        while not trade.trade_id and trade_id in self._entries():
+            trade_id += "_"
+        if trade_id in self._entries():
+            raise ValueError(f"交易已登记：{trade_id}")
+        self._records[trade_id] = trade
+
+    def record_settled_trade(self, *, opened_at, settled_at, side, amount, etf_shares, net_pnl) -> TradeRecord:
+        if settled_at is None:
+            raise TypeError("settled_at is required for a settled trade.")
+        record = TradeRecord(opened_at, side, amount, etf_shares, net_pnl, settled_at)
+        self.record_trade(record)
+        return record
+
+    def to_rows(self) -> list[dict[str, str]]:
+        """Six columns for completed records with ETF-leg amount metadata."""
+        rows = []
+        for trade in self.trades:
+            if not trade.is_settled:
+                continue
+            if not isinstance(trade, TradeRecord):
+                raise ValueError(f"交易 {trade.trade_id} 缺少六列账本所需的方向、ETF份数或成交额。")
+            rows.append(dict(zip(TRADE_COLUMNS, (
+                trade.opened_at.isoformat(sep=" "), trade.trade_type, str(trade.amount),
+                str(trade.etf_shares), trade.trade_result, str(trade.net_pnl)))))
+        return rows
+
+    def export_csv(self, path: str | Path) -> Path:
+        target = Path(path)
+        rows = self.to_rows()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=TRADE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(rows)
+        return target
 
     def summarize_pnl(
         self,
@@ -180,7 +248,7 @@ class PortfolioLedger:
 
         selected = [
             trade
-            for trade in self._trades.values()
+            for trade in self._entries().values()
             if start_date <= trade.opened_at.date() <= end_date
         ]
         settled = [trade for trade in selected if trade.is_settled]
@@ -217,7 +285,7 @@ class PortfolioLedger:
     def to_closed_trades(self) -> tuple[ClosedTrade, ...]:
         """适配现有报告接口，不假设 ClosedTrade 有日期字段。"""
         return tuple(
-            ClosedTrade(trade_id=trade.trade_id, pnl=trade.pnl)
-            for trade in self.trades
+            ClosedTrade(trade_id=trade_id, pnl=trade.pnl)
+            for trade_id, trade in sorted(self._entries().items(), key=lambda pair: pair[1].opened_at)
             if trade.is_settled and trade.pnl is not None
         )

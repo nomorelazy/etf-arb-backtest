@@ -1,7 +1,7 @@
 """Pending money is a receivable/payable until its configured payment date."""
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 
 
@@ -19,6 +19,15 @@ class CashLeg:
     due: date | None = None
     known_on: date | None = None
     paid: bool = False
+    pricing_deadline: date | None = None
+    attempt_scheduled_at: datetime | None = None
+    notice_due_on: date | None = None
+    latest_payment_on: date | None = None
+    payment_at: datetime | None = None
+    paid_at: datetime | None = None
+    pricing_basis: str = ""
+    payment_basis: str = "unknown"
+    priced_at: datetime | None = None
 
     @property
     def outstanding(self):
@@ -35,4 +44,30 @@ class CashLeg:
             raise ValueError("Non-finite actual cash component")
         self.final = deposit - amount if side.value == "CREATE" else deposit + amount
         self.known_on = pcf.effective_date
-        self.due = trading_day_after(calendar, pcf.effective_date, lag)
+        self.priced_at = datetime.combine(pcf.effective_date, datetime.min.time())
+        if lag is not None and self.payment_at is None:
+            self.due = trading_day_after(calendar, pcf.effective_date, lag)
+            self.payment_basis = "explicit_research_lag"
+
+
+def load_payment_dates(path):
+    """JSON rows: trade_id, kind, paid_at; no calendar-generated receipts."""
+    import json
+    from pathlib import Path
+    if path is None:
+        return {}
+    rows = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+    if not isinstance(rows, list):
+        raise ValueError("Payment dates must be a JSON array")
+    result = {}
+    for row in rows:
+        if not isinstance(row, dict) or set(row) != {"trade_id", "kind", "paid_at"}:
+            raise ValueError("Each payment date needs trade_id, kind and paid_at")
+        at = datetime.fromisoformat(row["paid_at"])
+        key = row["trade_id"], row["kind"]
+        if not isinstance(key[0], str) or not key[0] or key[1] not in {"cash_difference", "cash_substitution"}:
+            raise ValueError("Invalid payment reference or kind")
+        if at.tzinfo is not None or key in result:
+            raise ValueError("Payment dates must be naive Beijing times and unique per leg")
+        result[key] = at
+    return result
