@@ -40,6 +40,7 @@ class SimOrder:
     paused: bool = False
     manager_attempted_at: datetime | None = None
     next_minute_attempted_at: datetime | None = None
+    last_sh_attempted_at: datetime | None = None
 
     @property
     def remaining(self):
@@ -126,14 +127,17 @@ class ArbitrageSimulator:
                         context.resources.config.trading_days, self.settings.cash_difference_lag,
                     )
 
-    def _can_trade(self, order, context, *, application_minute=False):
+    def _can_trade(self, order, context, *, application_minute=False, sh_window=False):
         now = context.now
         if (now < order.submitted or (now == order.submitted and not application_minute)
                 or now.date() < order.not_before_day):
             return "waiting_for_later_bar_or_sell_availability"
-        if self.trading_times.is_blocked(now.time()):
+        if sh_window:
+            if not self.cash_timing.allows_sh_attempt(now):
+                return "outside_sh_proxy_minutes"
+        elif self.trading_times.is_blocked(now.time()):
             return "blocked_trade_minute"
-        if not self.trading_times.allows(now.time()):
+        elif not self.trading_times.allows(now.time()):
             return "outside_trading_sessions"
         return security_trade_block(context.resources.rules, order.symbol, now, order.side,
                                     self.settings.security_rule_policy)
@@ -208,23 +212,30 @@ class ArbitrageSimulator:
             self._order(trade, symbol, "BUY", quantity, context.now, "ENTRY")
         # An all-cash creation still waits for a later bar before applying.
 
-    def _fill(self, order, trade, context, *, next_minute=False):
+    def _fill(self, order, trade, context, *, next_minute=False, sh_window=False):
         if not order.remaining or order.paused:
             return
         if next_minute:
-            valid_proxy = order.purpose == "MANAGER" and order.symbol.endswith(".SH")
             valid_redemption_exit = (trade.decision.side is Side.REDEEM and order.purpose == "EXIT"
                                      and order.symbol in trade.plan.physical)
-            if (not self.settings.market_split_execution or not (valid_proxy or valid_redemption_exit)
+            if (not self.settings.market_split_execution or not valid_redemption_exit
                     or trade.applied_at != context.now
                     or context.now != trade.decision.ts + timedelta(minutes=1)):
                 raise ValueError("Next-minute fills require a confirmed market-split t+1 application")
         if order.purpose == "MANAGER":
             sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
-            if next_minute:
-                if order.next_minute_attempted_at is not None:
+            if self.settings.market_split_execution and order.symbol.endswith(".SH"):
+                if not sh_window:
                     return
-                order.next_minute_attempted_at = context.now
+                if (trade.applied_at is None or context.now < trade.applied_at
+                        or (sub.pricing_deadline is not None and
+                            context.now > datetime.combine(sub.pricing_deadline, time(15)))):
+                    raise ValueError("SH proxy attempt is outside application-to-deadline window")
+                if order.last_sh_attempted_at == context.now:
+                    return
+                order.last_sh_attempted_at = context.now
+                if context.now == trade.applied_at:
+                    order.next_minute_attempted_at = context.now
             else:
                 if order.manager_attempted_at is not None:
                     return
@@ -233,14 +244,15 @@ class ArbitrageSimulator:
                     return
                 # Scheduled callback and regular clock may share a timestamp.
                 order.manager_attempted_at = context.now
-        block = self._can_trade(order, context, application_minute=next_minute)
+        block = self._can_trade(order, context, application_minute=next_minute or sh_window,
+                                sh_window=sh_window)
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
             return
         quantity = order.remaining
         cap = self.settings.max_shares_per_minute
-        if cap is not None and not next_minute and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
+        if cap is not None and not (next_minute or sh_window) and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
             quantity = min(quantity, cap)
         if order.purpose != "MANAGER":
             if order.side == "BUY":
@@ -278,7 +290,9 @@ class ArbitrageSimulator:
         self.fills.append(dict(ts=context.now, order_id=order.order_id, trade_id=trade.trade_id,
                                symbol=order.symbol, side=order.side, quantity=quantity, price=bar.close,
                                purpose=order.purpose, fee=fees.total, **asdict(fees), slippage=ZERO,
-                               basis=("manager_next_minute_close_proxy" if next_minute else "manager_scheduled_close_proxy")
+                               basis=(("manager_next_minute_close_proxy" if context.now == trade.applied_at
+                                       else "manager_first_tradable_close_proxy") if sh_window
+                                      else "manager_scheduled_close_proxy")
                                      if order.purpose == "MANAGER" else "next_minute_close"))
         self.fee_rows.append(dict(ts=context.now, trade_id=trade.trade_id, order_id=order.order_id,
             symbol=order.symbol, side=order.side, purpose=order.purpose,
@@ -360,7 +374,9 @@ class ArbitrageSimulator:
         sub.pricing_deadline, sub.notice_due_on, sub.latest_payment_on = self.cash_timing.dates(
             now.date(), context.resources.config.trading_days,
             context.resources.config.settlement_business_days)
-        sub.attempt_scheduled_at = self.cash_timing.attempt_at(sub.pricing_deadline)
+        has_scheduled_proxy = (not self.settings.market_split_execution or
+                              any(not symbol.endswith(".SH") for symbol in plan.manager))
+        sub.attempt_scheduled_at = self.cash_timing.attempt_at(sub.pricing_deadline) if has_scheduled_proxy else None
         if sub.attempt_scheduled_at is not None and sub.attempt_scheduled_at >= now:
             context.schedule(sub.attempt_scheduled_at,
                 lambda ctx, t=trade: self._attempt_substitution(t, ctx),
@@ -385,7 +401,7 @@ class ArbitrageSimulator:
         for symbol, quantity in plan.manager.items():
             self._order(trade, symbol, "BUY" if side is Side.CREATE else "SELL", quantity, now, "MANAGER")
         if self.settings.market_split_execution:
-            self._attempt_substitution(trade, context, next_minute=True)
+            self._attempt_sh_substitution(trade, context)
             if side is Side.REDEEM:
                 for order in self._orders(trade, "EXIT"):
                     self._fill(order, trade, context, next_minute=True)
@@ -395,26 +411,52 @@ class ArbitrageSimulator:
                 if not trade.delayed_redemption:
                     trade.redemption_prices_locked_at = now
         # SZ replacement purchases always retain their scheduled T+2 attempt,
-        # even if the stock becomes tradable earlier. SH failures remain pending.
+        # even if the stock becomes tradable earlier. SH retries every minute.
 
-    def _attempt_substitution(self, trade, context, *, next_minute=False):
+    def _attempt_substitution(self, trade, context):
         for order in self._orders(trade, "MANAGER"):
             if not order.remaining or order.paused:
                 continue
-            if next_minute and (not order.symbol.endswith(".SH") or order.next_minute_attempted_at is not None):
+            if self.settings.market_split_execution and order.symbol.endswith(".SH"):
                 continue
-            if not next_minute and order.manager_attempted_at is not None:
+            if order.manager_attempted_at is not None:
                 continue
             requested, before = order.remaining, order.filled
-            self._fill(order, trade, context, next_minute=next_minute)
+            self._fill(order, trade, context)
             filled = order.filled - before
             self.substitution_attempts.append(dict(trade_id=trade.trade_id, order_id=order.order_id,
                 symbol=order.symbol, ts=context.now, side=order.side, requested_quantity=requested,
                 filled_quantity=filled, unfilled_quantity=order.remaining,
                 result="FILLED" if filled == requested else "PARTIAL" if filled else "NO_FILL",
                 reason=order.last_block or ("quantity_cap" if filled < requested else ""),
-                timing="sh_next_minute" if next_minute else "scheduled_substitution"))
+                timing="scheduled_substitution"))
         self._settle(trade, context)
+
+    def _attempt_sh_substitution(self, trade, context, *, schedule_next=True):
+        sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
+        if sub.final is not None or trade.state != "APPLIED":
+            return
+        for order in self._orders(trade, "MANAGER"):
+            if (not order.symbol.endswith(".SH") or not order.remaining or order.paused
+                    or order.last_sh_attempted_at == context.now):
+                continue
+            requested, before = order.remaining, order.filled
+            self._fill(order, trade, context, sh_window=True)
+            filled = order.filled - before
+            self.substitution_attempts.append(dict(trade_id=trade.trade_id, order_id=order.order_id,
+                symbol=order.symbol, ts=context.now, side=order.side, requested_quantity=requested,
+                filled_quantity=filled, unfilled_quantity=order.remaining,
+                result="FILLED" if filled == requested else "NO_FILL", reason=order.last_block,
+                timing="sh_next_minute" if context.now == trade.applied_at else "sh_first_tradable_window"))
+        self._settle(trade, context)
+        pending = any(o.symbol.endswith(".SH") and o.remaining and not o.paused
+                      for o in self._orders(trade, "MANAGER"))
+        if schedule_next and pending:
+            next_at = self.cash_timing.next_sh_attempt(
+                context.now, context.resources.config.trading_days, sub.pricing_deadline)
+            if next_at is not None:
+                context.schedule(next_at, lambda ctx, t=trade: self._attempt_sh_substitution(t, ctx),
+                                 f"cash.sh_first_tradable.{trade.trade_id}")
 
     def _manager_value(self, trade, now):
         result = trade.plan.manager_fixed
@@ -482,6 +524,10 @@ class ArbitrageSimulator:
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
         if sub.final is not None or sub.pricing_deadline != context.now.date():
             return
+        if self.settings.market_split_execution and context.now.time() == time(15):
+            # The deadline callback may precede the queued 15:00 retry. Give
+            # that inclusive last minute a chance before valuing unfilled stock.
+            self._attempt_sh_substitution(trade, context, schedule_next=False)
         outstanding = [order for order in self._orders(trade, "MANAGER") if order.remaining]
         prices = {}
         for order in outstanding:

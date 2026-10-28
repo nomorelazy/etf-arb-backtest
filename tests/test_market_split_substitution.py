@@ -161,25 +161,28 @@ class MarketSplitSubstitutionTests(unittest.TestCase):
         self.assertEqual((attempt['ts'], attempt['reason']), (self.scheduled, 'missing_exact_bar'))
         self.assertEqual(runner.executor.substitution_pricing[0]['price'], D('1'))
 
-    def test_sh_missing_t_plus_one_quote_defers_and_records_both_attempts(self):
+    def test_sh_missing_t_plus_one_quote_retries_the_next_minute(self):
         rows = [r for r in self.rows() if (r[0], r[1]) != (self.entry, '600000.SH')]
         runner, _ = self.run_model(rows, replace(self.config, quality_check=False))
         attempts = runner.executor.substitution_attempts
         self.assertEqual([(r['ts'], r['result']) for r in attempts],
-                         [(self.entry, 'NO_FILL'), (self.scheduled, 'FILLED')])
+                         [(self.entry, 'NO_FILL'), (datetime.combine(fixtures.DAYS[0], time(9, 32)), 'FILLED')])
         self.assertEqual(attempts[0]['reason'], 'missing_exact_bar')
         proxy = next(f for f in runner.executor.fills if f['purpose'] == 'MANAGER')
-        self.assertEqual((proxy['ts'], proxy['price']), (self.scheduled, D('9')))
+        first_available = datetime.combine(fixtures.DAYS[0], time(9, 32))
+        self.assertEqual((proxy['ts'], proxy['price']), (first_available, D('9')))
         order = next(o for o in runner.executor.orders if o.purpose == 'MANAGER')
-        self.assertEqual((order.next_minute_attempted_at, order.manager_attempted_at),
-                         (self.entry, self.scheduled))
+        self.assertEqual((order.next_minute_attempted_at, order.last_sh_attempted_at),
+                         (self.entry, first_available))
+        self.assertIsNone(order.manager_attempted_at)
 
     def test_sh_trading_restrictions_apply_to_the_requested_direction(self):
         self.fixture.rules.add(SecurityTradingRule(
             '600000.SH', fixtures.DAYS[0], fixtures.DAYS[0], False, True))
         self.fixture.rules.add(SecurityTradingRule(
             '600000.SH', fixtures.DAYS[1], fixtures.DAYS[-1], True, True))
-        for side, expected in ((Side.CREATE, self.scheduled), (Side.REDEEM, self.entry)):
+        for side, expected in ((Side.CREATE, datetime.combine(fixtures.DAYS[1], time(9, 30))),
+                               (Side.REDEEM, self.entry)):
             runner, _ = self.run_model(self.rows(side),
                 replace(self.config, output_dir=self.fixture.root / side.value))
             self.assertEqual(next(f for f in runner.executor.fills if f['purpose'] == 'MANAGER')['ts'], expected)
