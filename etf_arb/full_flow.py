@@ -11,6 +11,7 @@ from etf_arb.decision.premium import PremiumDiscountSource
 from etf_arb.execution.simulator import ArbitrageSimulator
 from etf_arb.report.render import save_report
 from etf_arb.report.ledger import save_ledger_report
+from etf_arb.report.attribution import build_trade_attribution, save_attribution_csv
 from etf_arb.runner import BacktestRunner, RunnerConfigError, RunnerHooks
 
 
@@ -145,18 +146,26 @@ def make_full_runner(config, *, rules=None):
              substitution_deposit=trade_by_id[t.trade_id].plan.substitution_deposit,
              domestic_fixed_cash=trade_by_id[t.trade_id].plan.domestic_fixed,
              estimated_cash=trade_by_id[t.trade_id].plan.estimated_cash,
+             signal_gross_edge=trade_by_id[t.trade_id].decision.gross_edge,
+             **trade_by_id[t.trade_id].signal_reference,
              net_pnl=t.pnl, reason=trade_by_id[t.trade_id].reason) for t in resources.portfolio.trades]
         _csv(output / "trades.csv", trade_rows,
              ["trade_id", "opened_at", "applied_at", "redemption_prices_locked_at", "delayed_redemption_components", "next_signal_not_before", "settled_at", "side", "quantity_units", "etf_shares", "etf_leg_amount", "state", "net_pnl", "reason",
-              "pcf_path", "substitution_deposit", "domestic_fixed_cash", "estimated_cash"])
+              "pcf_path", "substitution_deposit", "domestic_fixed_cash", "estimated_cash",
+              "signal_gross_edge", "signal_physical_value", "signal_manager_value", "signal_fixed_cash", "signal_physical_quantity"])
         resources.portfolio.export_csv(output / "portfolio_ledger.csv")
         settlement_rows = [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs]
+        attribution_rows = build_trade_attribution(trade_rows, source.rows, executor.fills,
+            settlement_rows, executor.fee_rows, executor.substitution_pricing)
+        save_attribution_csv(output / "trade_attribution.csv", attribution_rows)
         save_ledger_report(output / "report/ledger.html", trade_rows, account.rows,
                            executor.fills, settlement_rows, executor.substitution_pricing,
-                           executor.substitution_attempts, executor.creation_substitutions, executor.fee_rows)
+                           executor.substitution_attempts, executor.creation_substitutions, executor.fee_rows,
+                           attribution_rows=attribution_rows)
         save_report(executor.equity_curve, resources.portfolio.to_closed_trades(), output / "report",
                     starting_cash=config.starting_cash,
                     trade_rows=resources.portfolio.to_rows(), financial_summary=summary,
+                    attribution_rows=attribution_rows,
                     total_costs=fee_totals["total"],
                     title="159338 Research simulation (configured fees, slippage=0; proxy cash settlement)",
                     peak_cash_usage=max(Decimal("0"), max((config.starting_cash - row["cash_balance"] for row in account.rows), default=Decimal("0"))),

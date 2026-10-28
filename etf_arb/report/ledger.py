@@ -20,7 +20,8 @@ def _table(rows):
             + "</tbody></table></div>")
 
 
-def save_ledger_report(path, trades, cashflows, fills, settlements, pricing_rows=(), attempt_rows=(), creation_substitutions=(), fee_rows=()):
+def save_ledger_report(path, trades, cashflows, fills, settlements, pricing_rows=(), attempt_rows=(), creation_substitutions=(), fee_rows=(),
+                       *, attribution_rows=()):
     groups = []
     for records in (cashflows, fills, settlements, pricing_rows, attempt_rows, creation_substitutions, fee_rows):
         grouped = defaultdict(list)
@@ -39,6 +40,9 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
 <p>基金经理代买卖是现金替代计算依据，其税费计入退补款，不重复扣投资者现金；定价日收盘估值不伪装成成交。当前使用 close 简化成交，税费按本轮配置逐笔计算，额外滑点为零。</p>
 <button onclick="document.querySelectorAll('details').forEach(d=>d.open=true)">展开全部</button>
 <button onclick="document.querySelectorAll('details').forEach(d=>d.open=true);window.print()">打印全部</button>"""
+    from etf_arb.report.attribution import display_row
+    attribution_by_id = {row['trade_id']: row for row in attribution_rows}
+    from urllib.parse import quote
     for trade in trades:
         tid = trade['trade_id']
         flows = groups[0][tid]
@@ -47,7 +51,11 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
         if closed and total != Decimal(str(trade['net_pnl'])):
             raise ValueError(f"Trade cash-flow reconciliation failed: {tid}")
         label = "最终盈亏" if closed else "累计现金变动（未结清）"
-        document += f"<details><summary>{escape(tid)} | {escape(str(trade['opened_at']))} | {label} {total:+f} 元</summary>"
+        document += f'<details id="trade-{quote(tid, safe="")}"><summary>{escape(tid)} | {escape(str(trade["opened_at"]))} | {label} {total:+f} 元</summary>'
+        if tid in attribution_by_id:
+            document += "<h2>信号价差、最终盈亏及两类现金影响</h2>" + _table(
+                {'项目': key, '数值': value}
+                for key, value in display_row(attribution_by_id[tid]).items())
         document += _table([trade]) + "<h2>全部账户现金及证券事件</h2>" + _table(flows)
         document += "<h2>投资者成交</h2>" + _table(row for row in groups[1][tid] if row['purpose'] != 'MANAGER')
         document += "<h2>逐笔交易税费（投资者扣款与代买卖费用分别标记）</h2>" + _table(groups[6][tid])
@@ -56,7 +64,11 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
         document += "<h2>现金替代代买卖计算依据（不重复加减现金）</h2>" + _table(row for row in groups[1][tid] if row['purpose'] == 'MANAGER')
         document += "<h2>未成交部分在定价期限日的估值</h2>" + _table(groups[3][tid])
         document += "<h2>定价、通知与付款状态</h2>" + _table(groups[2][tid]) + "</details>"
-    document += "</html>"
+    document += """<script>
+function openLinkedTrade(){const trade=document.getElementById(location.hash.slice(1));
+ if(trade&&trade.tagName==='DETAILS'){trade.open=true;trade.scrollIntoView();}}
+window.addEventListener('hashchange',openLinkedTrade);openLinkedTrade();
+</script></html>"""
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(document, encoding='utf-8')
