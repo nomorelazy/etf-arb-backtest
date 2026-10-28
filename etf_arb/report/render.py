@@ -212,7 +212,7 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                         "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"
                         f"本轮未结清套利数量峰值：{financial_summary['peak_open_cycles']} 笔。</p>")
         if financial_summary.get('market_split_execution'):
-            details += ("<p>沪深代买卖时点分离：沪市申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
+            details += ("<p>沪深代买卖时点分离：沪市申购代买，从实际提交申赎起至 T+2 日 15:00（含），"
                         "在首个可成交分钟使用精确 close 足额定价；期间逐分钟检查，含收盘最后一分钟。"
                         "整个窗口仍未成交的数量按 T+2 日精确收盘价估值，不伪造成交或收取成交税费。"
                         "赎回买入 ETF 及卖出正常可交易深市实物股票使用信号后 t+1 分钟价格。"
@@ -221,6 +221,16 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                         "成交、现金替代最终金额确认和实际到账分别记录。</p>"
                         f"<p>赎回全部股票已在 t+1 锁价：{financial_summary.get('redemption_price_locked_count', 0)} 笔；"
                         f"含延迟卖出部分：{financial_summary.get('delayed_redemption_count', 0)} 笔。</p>")
+            if not financial_summary.get('redemption_sales_at_next_minute'):
+                details += "<p>本轮显式启用旧赎回路径：沪市代卖也在申请至 T+2 收盘窗口内寻找首个可成交分钟。</p>"
+        if financial_summary.get('estimated_cash_interim_settlement'):
+            details += ("<p>预估现金先交割、次日找补：E 为当日预估现金，A 为下一交易日清单披露的当日实际现金差额，"
+                        "均已乘申赎单位。申购当日付 E、次日收 E−A；赎回当日收 E、次日收 A−E；负数表示付款。"
+                        "未指定付款时间或研究 lag 时，次日首个允许回测分钟模拟交割，标记 next_day_adjustment_research。"
+                        "这是用户指定的回测交割假设；现金替代退补款仍单独记录实际到账，缺次日实际金额则待交收。</p>")
+        if financial_summary.get('redemption_sales_at_next_minute'):
+            details += ("<p>赎回代卖使用信号后 t+1 分钟精确 close；买入 ETF 前统一检查沪深股票该分钟的卖出行情和许可。"
+                        "不能按 t+1 成交时在入场前报错，不以未来价格替代。</p>")
         if 'fee_breakdown' in financial_summary:
             details += (f"<h2>交易税费</h2><p>成交税费合计 {Decimal(financial_summary['fee']):,.2f} 元；"
                         f"其中投资者账户扣款 {Decimal(financial_summary['investor_fees']):,.2f} 元，"

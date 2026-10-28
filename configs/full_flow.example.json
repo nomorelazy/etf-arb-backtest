@@ -27,6 +27,8 @@
     "security_rule_policy": "assume_tradable",
     "assume_full_basket_fill": true,
     "market_split_execution": true,
+    "estimated_cash_interim_settlement": true,
+    "redemption_sales_at_next_minute": true,
     "fees": {
       "stock_commission": "0.0001",
       "etf_commission": "0.00005",

@@ -28,26 +28,45 @@ class CashLeg:
     pricing_basis: str = ""
     payment_basis: str = "unknown"
     priced_at: datetime | None = None
+    estimated_component: Decimal | None = None
+    actual_component: Decimal | None = None
+    component_difference: Decimal | None = None
+    initial_cash_flow: Decimal | None = None
 
     @property
     def outstanding(self):
         return Decimal("0") if self.paid else (self.estimate if self.final is None else self.final)
 
-    def observe_cash_component(self, pcf, opened_day, side, units, deposit, calendar, lag):
+    def observe_cash_component(self, pcf, opened_day, side, units, deposit, calendar, lag,
+                               *, interim_settlement=False):
         # CashComponent is labelled by PreTradingDay, NOT by the PCF publication date.
         if self.kind != "cash_difference" or self.final is not None:
             return
         if pcf.pre_trading_day != opened_day or pcf.actual_cash_component is None:
             return
+        if interim_settlement and pcf.effective_date != trading_day_after(calendar, opened_day, 1):
+            return  # Never substitute a later day's disclosure for the required T+1 PCF.
         amount = pcf.actual_cash_component * units
         if not amount.is_finite():
             raise ValueError("Non-finite actual cash component")
-        self.final = deposit - amount if side.value == "CREATE" else deposit + amount
+        self.actual_component = amount
+        if interim_settlement:
+            sign = Decimal("-1") if side.value == "CREATE" else Decimal("1")
+            self.estimated_component = deposit
+            self.initial_cash_flow = sign * deposit
+            self.component_difference = amount - deposit
+            self.final = sign * self.component_difference
+            self.pricing_basis = "actual_minus_interim_estimate"
+        else:
+            self.final = deposit - amount if side.value == "CREATE" else deposit + amount
         self.known_on = pcf.effective_date
         self.priced_at = datetime.combine(pcf.effective_date, datetime.min.time())
         if lag is not None and self.payment_at is None:
             self.due = trading_day_after(calendar, pcf.effective_date, lag)
             self.payment_basis = "explicit_research_lag"
+        elif interim_settlement and self.payment_at is None:
+            self.due = pcf.effective_date
+            self.payment_basis = "next_day_adjustment_research"
 
 
 def load_payment_dates(path):
