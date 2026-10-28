@@ -1,7 +1,16 @@
 """Ordinary-case pricing and notice dates; a deadline is not a payment record."""
 
 from dataclasses import dataclass
-from datetime import datetime, time
+from datetime import datetime, time, timedelta
+
+
+# Minute-close research clock for manager proxies, including the closing bar.
+# It is independent of the investor's narrower arbitrage-opening window.
+SH_PROXY_MINUTES = tuple(
+    time(minute // 60, minute % 60)
+    for start, end in ((9 * 60 + 30, 11 * 60 + 30), (13 * 60, 15 * 60))
+    for minute in range(start, end + 1)
+)
 
 
 @dataclass(frozen=True)
@@ -25,6 +34,22 @@ class CashSubstitutionTiming:
 
     def attempt_at(self, pricing_day):
         return None if pricing_day is None else datetime.combine(pricing_day, self.attempt_time)
+
+    def allows_sh_attempt(self, at):
+        return at.second == 0 and at.microsecond == 0 and at.time() in SH_PROXY_MINUTES
+
+    def next_sh_attempt(self, now, trading_days, deadline):
+        """Use only the supplied calendar, never a weekday approximation."""
+        for day in trading_days:
+            if day < now.date() or (deadline is not None and day > deadline):
+                continue
+            start = datetime.combine(day, SH_PROXY_MINUTES[0])
+            target = max(start, now + timedelta(minutes=1))
+            while target.date() == day and target.time() <= SH_PROXY_MINUTES[-1]:
+                if self.allows_sh_attempt(target):
+                    return target
+                target += timedelta(minutes=1)
+        return None
 
     def dates(self, applied_on, trading_days, business_days=None):
         index = trading_days.index(applied_on) + self.pricing_trading_days

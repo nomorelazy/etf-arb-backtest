@@ -35,10 +35,11 @@ class FullFlowTests(unittest.TestCase):
         self.pcf.mkdir()
         self.market.mkdir()
         self.rules = InMemoryRuleRepository([ETFRule("159338", DAYS[0], DAYS[-1], True, True, time(14, 55), time(14, 55))])
+        # Preserve old timing cases; market-split defaults have separate full-runner tests.
         self.config = RunnerConfig(DAYS[0], DAYS[0], ("159338",), self.pcf, self.market,
                                    self.root / "run", DAYS, starting_cash=D("10000"), mode="execute",
                                    clock_times=CLOCKS, settlement_end_date=DAYS[-1],
-                                   simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56")), fees=FeeRates.zero()))
+                                   simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56")), fees=FeeRates.zero(), market_split_execution=False))
         self.write_pcfs()
 
     def write_pcfs(self, wrong_date=False):
