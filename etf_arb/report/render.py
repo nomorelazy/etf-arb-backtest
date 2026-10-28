@@ -97,6 +97,7 @@ def save_report(
     title: str = "ETF Arbitrage Backtest",
     trade_rows: Sequence[dict] | None = None,
     financial_summary: dict | None = None,
+    attribution_rows: Sequence[dict] | None = None,
 ) -> BacktestSummary:
     """输出 metrics.csv、equity.csv 和 pnl_report.png。"""
     import matplotlib
@@ -169,11 +170,16 @@ def save_report(
     fig.savefig(chart_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
     _save_html(summary, output / "report.html", chart_path.name,
-               trade_rows=trade_rows, financial_summary=financial_summary)
+               trade_rows=trade_rows, financial_summary=financial_summary,
+               attribution_rows=attribution_rows)
+    if attribution_rows is not None:
+        from etf_arb.report.attribution import save_attribution_csv
+        save_attribution_csv(output / "trade_attribution.csv", attribution_rows)
     return summary
 
 
-def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None) -> None:
+def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None,
+               attribution_rows=None) -> None:
     labels = {
         "total_return": "区间收益率",
         "annualized_return": "年化收益率",
@@ -202,10 +208,13 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
     details = ""
     if financial_summary is not None:
         final = financial_summary['final_net_pnl']
+        creation_threshold = financial_summary.get('creation_threshold', financial_summary.get('premium_threshold'))
+        redemption_threshold = financial_summary.get('redemption_threshold', financial_summary.get('premium_threshold'))
         final_text = "待全部结清后确定" if final is None else f"{Decimal(final):,.2f} 元"
         details += (f"<h2>发起期间的最终盈亏</h2><p>{escape(final_text)}；"
                     f"已结清 {financial_summary['settled_count']} 笔，待完成 {financial_summary['pending_count']} 笔。</p>"
-                    f"<p>本轮折溢价门槛：{Decimal(financial_summary['premium_threshold']):.4%}。"
+                    f"<p>本轮门槛：申购溢价严格大于 {Decimal(creation_threshold):.4%}；"
+                    f"赎回折价幅度严格大于 {Decimal(redemption_threshold):.4%}。"
                     "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
         if financial_summary.get('frequency_anchor') == 'application_submitted_at':
             details += (f"<p>交易节奏：以上一笔实际提交申赎时间起算，满 {financial_summary['min_trade_interval_minutes']} 分钟后，"
@@ -229,6 +238,9 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
             names = {'commission': '佣金', 'stamp_duty': '印花税', 'transfer_fee': '过户费', 'handling_fee': '经手费'}
             details += _table([{'费用项目': label, '金额（元）': financial_summary['fee_breakdown'][key]}
                                for key, label in names.items()])
+    if attribution_rows is not None:
+        from etf_arb.report.attribution import attribution_html
+        details += attribution_html(attribution_rows)
     if trade_rows is not None:
         from etf_arb.report.ledger import _table
         details += "<h2>已结清套利六列账本（按发起时间）</h2>" + _table(trade_rows)

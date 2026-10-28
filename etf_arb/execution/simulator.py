@@ -16,6 +16,7 @@ from etf_arb.execution.plan import application_allowed, build_plan
 from etf_arb.portfolio.account import CashAccount, ZERO
 from etf_arb.portfolio.ledger import LedgerEventType as Event
 from etf_arb.report.models import EquityPoint
+from etf_arb.report.attribution import signal_reference
 from etf_arb.rules import TradeFrequencyRule, TradingTimeRule
 from etf_arb.rules.tradability import security_trade_block
 from etf_arb.rules.cash_substitution import CashSubstitutionTiming
@@ -60,6 +61,7 @@ class SimTrade:
     reason: str = ""
     redemption_prices_locked_at: datetime | None = None
     delayed_redemption: dict[str, str] = field(default_factory=dict)
+    signal_reference: dict = field(default_factory=dict)
 
 
 class ArbitrageSimulator:
@@ -194,6 +196,10 @@ class ArbitrageSimulator:
             self.rejections.append(dict(ts=context.now, reason=reason))
             return
         trade = SimTrade(f"T{len(self.trades)+1:06}", decision, pcf, plan)
+        def observed_price(symbol):
+            bar = self.prices.get(symbol, context.now)
+            return None if bar is None else bar.close
+        trade.signal_reference = signal_reference(plan, pcf, decision.quantity_units, observed_price)
         self.trades.append(trade)
         self.peak_open_cycles = max(self.peak_open_cycles,
                                     sum(t.state != "CLOSED" for t in self.trades))

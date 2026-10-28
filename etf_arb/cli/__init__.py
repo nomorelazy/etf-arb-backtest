@@ -56,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--output", default="reports/latest", help="report output directory")
     report_parser.add_argument("--risk-free-rate", type=float, default=0.0, help="annual risk-free rate, e.g. 0.02")
     report_parser.add_argument("--periods-per-year", type=int, default=252)
+    attribution_parser = subparsers.add_parser('report-attribution',
+        help='rebuild a detailed report from an existing completed run without executing trades')
+    attribution_parser.add_argument('--run-dir', required=True)
+    attribution_parser.add_argument('--output', required=True, help='fresh report output folder')
     return parser
 
 
@@ -131,6 +135,15 @@ def main() -> int:
             print(f"Research simulation final PnL: {result.financial_summary['final_net_pnl']}")
             print(f"Pending trades: {result.financial_summary['pending_count']}")
             print(f"HTML report: {result.output_dir / 'report' / 'report.html'}")
+    elif args.command == 'report-attribution':
+        from etf_arb.report.rebuild import rebuild_run_report
+        try:
+            report = rebuild_run_report(args.run_dir, args.output)
+        except (ValueError, TypeError, OSError) as error:
+            print(f'Report rebuild failed: {error}')
+            return 2
+        print(f'HTML report: {report}')
+        print('Report only; no backtest was started.')
     elif args.command == "report":
         from etf_arb.report.io import load_equity_csv, load_trades_csv
         from etf_arb.report.render import save_report
