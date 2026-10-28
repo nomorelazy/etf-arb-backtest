@@ -26,6 +26,7 @@ class SimulationConfig:
     security_rule_policy: str = "require"
     assume_full_basket_fill: bool = True
     fees: FeeRates = field(default_factory=FeeRates)
+    market_split_execution: bool = True
 
     def __post_init__(self):
         if isinstance(self.fees, dict):
@@ -56,3 +57,7 @@ class SimulationConfig:
             raise ValueError("security_rule_policy must be require or assume_tradable")
         if type(self.assume_full_basket_fill) is not bool:
             raise ValueError("assume_full_basket_fill must be a bool")
+        if type(self.market_split_execution) is not bool:
+            raise ValueError("market_split_execution must be a bool")
+        if self.market_split_execution and not self.assume_full_basket_fill:
+            raise ValueError("market_split_execution requires assume_full_basket_fill")

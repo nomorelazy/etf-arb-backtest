@@ -87,6 +87,11 @@ class PremiumDiscountSource:
                    for clock in context.resources.config.clock_times):
             row["reason"] = "no_later_entry_minute_today"
             return ()
+        if self.settings.market_split_execution and not self.trading_times.has_next_minute(
+            now, context.resources.config.clock_times
+        ):
+            row["reason"] = "no_exact_next_minute_for_market_split"
+            return ()
         rule = context.resources.rules.get(pcf.etf_code, now.date())
         if not application_allowed(pcf, rule, side, self.settings.quantity_units, now.time()):
             row["reason"] = "application_disabled_or_limit"

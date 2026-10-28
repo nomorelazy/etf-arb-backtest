@@ -1,7 +1,7 @@
 """User-configured trading windows, separate from exchange session definitions."""
 
 from dataclasses import dataclass
-from datetime import time
+from datetime import time, timedelta
 
 @dataclass(frozen=True)
 class TradingTimeRule:
@@ -58,3 +58,9 @@ class TradingTimeRule:
             if self.allows(time(value // 60, value % 60)):
                 return True
         return False
+
+    def has_next_minute(self, now, clock_times) -> bool:
+        """An exact t+1 runner minute, without bridging lunch or overnight."""
+        target = now + timedelta(minutes=1)
+        return (target.date() == now.date() and target.time() in clock_times
+                and self.allows(target.time()))

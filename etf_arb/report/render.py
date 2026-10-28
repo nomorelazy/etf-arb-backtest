@@ -211,6 +211,15 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
             details += (f"<p>交易节奏：以上一笔实际提交申赎时间起算，满 {financial_summary['min_trade_interval_minutes']} 分钟后，"
                         "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"
                         f"本轮未结清套利数量峰值：{financial_summary['peak_open_cycles']} 笔。</p>")
+        if financial_summary.get('market_split_execution'):
+            details += ("<p>沪深代买卖时点分离：沪市申购代买、赎回代卖使用信号后 t+1 分钟精确 close；"
+                        "赎回买入 ETF 及卖出深市实物股票也使用同一分钟价格。"
+                        "深市申购现金替代补券按配置的后续时点尝试，默认 T+2 日 14:30。"
+                        "沪市无法成交的部分保留待处理状态，进入原定时尝试及未成交估值流程；"
+                        "深市无法卖出的实物股票继续持有并等待后续可交易分钟。"
+                        "成交、现金替代最终金额确认和实际到账分别记录。</p>"
+                        f"<p>赎回全部股票已在 t+1 锁价：{financial_summary.get('redemption_price_locked_count', 0)} 笔；"
+                        f"含延迟卖出部分：{financial_summary.get('delayed_redemption_count', 0)} 笔。</p>")
         if 'fee_breakdown' in financial_summary:
             details += (f"<h2>交易税费</h2><p>成交税费合计 {Decimal(financial_summary['fee']):,.2f} 元；"
                         f"其中投资者账户扣款 {Decimal(financial_summary['investor_fees']):,.2f} 元，"
