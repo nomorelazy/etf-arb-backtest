@@ -242,8 +242,6 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
         from etf_arb.report.attribution import attribution_html
         details += attribution_html(attribution_rows)
     if trade_rows is not None:
-        from etf_arb.report.ledger import _table
-        details += "<h2>已结清套利六列账本（按发起时间）</h2>" + _table(trade_rows)
         quality = ('<a href="../quality/summary.json">数据缺失检查</a>'
                    if (path.parent.parent / 'quality/summary.json').is_file()
                    else '本轮未执行缺失检查')
@@ -257,16 +255,19 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
 <title>ETF 申赎套利回测报告</title>
 <style>
 body {{ font-family: system-ui, sans-serif; max-width: 1100px; margin: 32px auto; padding: 0 20px; color: #20252b; }}
+body.wide-report {{ max-width: none; }}
 table {{ border-collapse: collapse; min-width: 420px; margin: 20px 0; }}
 th, td {{ border-bottom: 1px solid #ddd; padding: 10px 14px; text-align: left; }}
-th {{ background: #f4f6f8; }} img {{ width: 100%; height: auto; }}
+th {{ background: #f4f6f8; }} img {{ width: 100%; max-width:1100px; height: auto; }}
 .note {{ color: #555; line-height: 1.6; }}
 </style>
+<body class="{'wide-report' if attribution_rows is not None else ''}">
 <h1>ETF 申赎套利回测报告</h1>
 <table><tbody>{rows}</tbody></table>
 <img src="{chart_name}" alt="累计 PnL 与回撤图">
 <p class="note">基于日频账户总权益和已平仓套利交易计算。最大回撤以正数表示回撤幅度；盈亏比为平均盈利除以平均亏损绝对值；未平仓交易不计入胜率和盈亏比。</p>
 {details}
+</body>
 </html>
 """
     path.write_text(document, encoding="utf-8")

@@ -65,6 +65,13 @@ class ReportAttributionTests(unittest.TestCase):
                 report = (config.output_dir / 'report/report.html').read_text(encoding='utf-8')
                 for label in ('最终净盈亏', '信号折溢价率', '现金替代价格盈亏', '预估现金盈亏影响'):
                     self.assertIn(label, report)
+                self.assertEqual(summary['creation_count'], int(side == 'CREATE'))
+                self.assertEqual(summary['redemption_count'], int(side == 'REDEEM'))
+                self.assertIn('申购 1 笔，赎回 0 笔' if side == 'CREATE' else '申购 0 笔，赎回 1 笔', report)
+                self.assertNotIn('已结清套利六列账本（按发起时间）', report)
+                self.assertNotIn('max-height:650px', report)
+                self.assertNotIn('overflow:auto', report)
+                self.assertIn('<tfoot>', report)
                 for label in ('信号ETF价', '信号IOPV', '每份价差', '现金替代定价时间',
                               '现金替代到账时间', '实际现金披露日', '现金差额到账时间',
                               '现金替代状态', '现金差额状态', '对账状态'):
