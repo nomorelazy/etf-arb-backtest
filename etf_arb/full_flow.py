@@ -47,6 +47,8 @@ def make_full_runner(config, *, rules=None):
             blocked_trade_minutes=list(settings.blocked_trade_minutes),
             trading_sessions=[list(pair) for pair in settings.trading_sessions],
             settlement_basis="research_proxy", opened_count=period.opened_count,
+            creation_count=sum(t.decision.side.value == 'CREATE' for t in executor.trades),
+            redemption_count=sum(t.decision.side.value == 'REDEEM' for t in executor.trades),
             settled_count=period.settled_count, pending_count=period.pending_count,
             settled_net_pnl=str(period.settled_net_pnl),
             final_net_pnl=None if period.final_net_pnl is None else str(period.final_net_pnl),

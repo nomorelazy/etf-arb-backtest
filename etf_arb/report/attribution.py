@@ -13,11 +13,21 @@ from etf_arb.pricing.iopv import SubstitutionKind, _normalize_substitution_flag
 ZERO = Decimal('0')
 SIGNAL_BASIS_FIELDS = ('signal_physical_value', 'signal_manager_value', 'signal_fixed_cash',
                        'signal_physical_quantity')
-REPORT_FIELDS = ('trade_id', 'opened_at', 'side', 'net_pnl', 'signal_premium_rate',
-                 'signal_gross_edge', 'cash_substitution_pnl', 'estimated_cash_pnl',
-                 'cash_substitution_cash_amount', 'estimated_cash', 'actual_cash',
-                 'etf_price_effect', 'physical_price_effect', 'investor_fees', 'manager_fees',
-                 'cash_substitution_valued_quantity')
+REPORT_COLUMNS = {
+    'trade_id': '交易编号', 'opened_at': '发起时间', 'side': '方向',
+    'net_pnl': '最终净盈亏（元）', 'signal_premium_rate': '信号折溢价率',
+    'signal_gross_edge': '信号毛价差（元）',
+    'cash_substitution_pnl': '现金替代价格盈亏（元，含代理费）',
+    'estimated_cash_pnl': '预估现金盈亏影响（元）',
+    'cash_substitution_cash_amount': '现金替代退补／应收款（元，非利润）',
+    'estimated_cash': '预估现金E（元）', 'actual_cash': '实际现金A（元）',
+    'etf_price_effect': 'ETF价格变化影响（元）',
+    'physical_price_effect': '实物股票价格影响（元）',
+    'investor_fees': '投资者税费（元）',
+    'manager_fees': '代理税费（元，已含在替代盈亏）',
+    'cash_substitution_valued_quantity': '未成交估值数量',
+}
+REPORT_FIELDS = tuple(REPORT_COLUMNS)
 
 
 def decimal(value):
@@ -147,41 +157,64 @@ def save_attribution_csv(path, rows):
 
 
 def display_row(row):
-    def amount(name, digits=2):
+    def cell(name):
+        if name in ('trade_id', 'opened_at', 'cash_substitution_valued_quantity'):
+            return row[name]
+        if name == 'side':
+            return '申购' if row[name] == 'CREATE' else '赎回'
         value = decimal(row.get(name))
-        return '未确定' if value is None else f'{value:,.{digits}f}'
-    premium = decimal(row.get('signal_premium_rate'))
-    return {'交易编号': row['trade_id'], '发起时间': row['opened_at'],
-        '方向': '申购' if row['side'] == 'CREATE' else '赎回',
-        '最终净盈亏（元）': amount('net_pnl'),
-        '信号折溢价率': '未确定' if premium is None else f'{premium:+.4%}',
-        '信号毛价差（元）': amount('signal_gross_edge'),
-        '现金替代价格盈亏（元，含代理费）': amount('cash_substitution_pnl'),
-        '预估现金盈亏影响（元）': amount('estimated_cash_pnl'),
-        '现金替代退补／应收款（元，非利润）': amount('cash_substitution_cash_amount'),
-        '预估现金E（元）': amount('estimated_cash'), '实际现金A（元）': amount('actual_cash'),
-        'ETF价格变化影响（元）': amount('etf_price_effect'),
-        '实物股票价格影响（元）': amount('physical_price_effect'),
-        '投资者税费（元）': amount('investor_fees'), '代理税费（元，已含在替代盈亏）': amount('manager_fees'),
-        '未成交估值数量': row['cash_substitution_valued_quantity']}
+        if value is None:
+            return '未确定'
+        return f'{value:+.4%}' if name == 'signal_premium_rate' else f'{value:,.2f}'
+    return {label: cell(name) for name, label in REPORT_COLUMNS.items()}
+
+
+def attribution_totals(rows):
+    """Sum exact source amounts; missing prices never become zero profit."""
+    result = {'trade_id': '合计', 'opened_at': f'共 {len(rows)} 笔',
+              'side': '—', 'signal_premium_rate': '—'}
+    for field in REPORT_FIELDS:
+        if field in result:
+            continue
+        values = [decimal(row.get(field)) for row in rows]
+        known = [value for value in values if value is not None]
+        missing = len(values) - len(known)
+        if missing and not known:
+            result[field] = f'未确定（{missing} 笔）'
+            continue
+        total = sum(known, ZERO)
+        result[field] = f'{total:,.0f}' if field == 'cash_substitution_valued_quantity' else f'{total:,.2f}'
+        if missing:
+            result[field] += f'（已知合计；{missing} 笔未确定）'
+    return {label: result[field] for field, label in REPORT_COLUMNS.items()}
 
 
 def attribution_html(rows):
+    creation_count = sum(row['side'] == 'CREATE' for row in rows)
+    redemption_count = sum(row['side'] == 'REDEEM' for row in rows)
+    counts = (f'<p id="trade-counts"><strong>申购 {creation_count} 笔，赎回 {redemption_count} 笔，'
+              f'合计 {len(rows)} 笔。</strong>按本轮实际发起的套利统计。</p>')
     if not rows:
-        return '<h2>逐笔价差与现金盈亏</h2><p>本轮没有已发起交易。</p>'
+        return '<h2>逐笔价差与现金盈亏</h2>' + counts + '<p>本轮没有已发起交易。</p>'
     shown = [display_row(r) for r in rows]
     columns = list(shown[0])
-    document = '''<h2 id="trade-attribution">逐笔价差与现金盈亏</h2>
+    document = '<h2 id="trade-attribution">逐笔价差与现金盈亏</h2>' + counts + '''
 <p>现金替代价格盈亏＝相对信号估值的价格变化，已包含代理税费；退补款／应收款是资金收付，不等于利润。
 预估现金影响：申购 E−A、赎回 A−E。已结清交易满足：信号毛价差＋ETF价格影响＋实物股票价格影响＋现金替代价格盈亏＋预估现金影响−投资者税费＝净盈亏。
 税费总额不再重复扣减；尚未确定的金额不填零。</p>
+<p>表尾合计随筛选更新，金额按未四舍五入的原值相加后显示到分，未成交估值数量按股数相加。
+编号、时间、方向和折溢价率不求和；存在未确定金额时，仅列已知合计并注明缺失笔数。</p>
 <p><a href="trade_attribution.csv">下载逐笔价差与现金盈亏 CSV</a></p>
 <label>筛选：<select id="attribution-filter"><option value="all">全部交易</option><option value="loss">仅亏损</option>
 <option value="create">仅申购</option><option value="redeem">仅赎回</option></select></label>
-<style>#attribution-table thead th{position:sticky;top:0;z-index:1}
+<style>#attribution-table{width:100%;min-width:0;table-layout:fixed;font-size:clamp(9px,.78vw,13px)}
+#attribution-table th,#attribution-table td{padding:8px 4px;white-space:normal;overflow-wrap:anywhere;vertical-align:top;line-height:1.5;text-align:right}
+#attribution-table th{font-weight:600}#attribution-table th:nth-child(-n+3),#attribution-table td:nth-child(-n+3){text-align:left}
+#attribution-table tfoot td{font-weight:700;background:#eaf1f8;border-top:2px solid #6b8299}
+#attribution-table tr[hidden]{display:none}
 #attribution-table tr[data-result="loss"] td:nth-child(4){color:#b42318}
 #attribution-table tr[data-result="win"] td:nth-child(4){color:#067647}</style>
-<div style="overflow:auto;max-height:650px"><table id="attribution-table"><thead><tr>'''
+<table id="attribution-table"><thead><tr>'''
     document += ''.join(f'<th>{escape(c)}</th>' for c in columns) + '</tr></thead><tbody>'
     for raw, values in zip(rows, shown):
         pnl = decimal(raw.get('net_pnl'))
@@ -191,12 +224,27 @@ def attribution_html(rows):
             value = escape(str(values[column]))
             if column == '交易编号':
                 value = f'<a href="ledger.html#trade-{quote(raw["trade_id"], safe="")}">{value}</a>'
-            document += '<td style="white-space:nowrap">' + value + '</td>'
+            document += '<td>' + value + '</td>'
         document += '</tr>'
-    return document + '''</tbody></table></div><script>
+    document += '</tbody><tfoot>'
+    groups = {
+        'all': rows,
+        'loss': [row for row in rows if decimal(row.get('net_pnl')) is not None and decimal(row['net_pnl']) < 0],
+        'create': [row for row in rows if row['side'] == 'CREATE'],
+        'redeem': [row for row in rows if row['side'] == 'REDEEM'],
+    }
+    for name, selected in groups.items():
+        hidden = '' if name == 'all' else ' hidden'
+        document += f'<tr data-summary-filter="{name}"{hidden}>'
+        totals = attribution_totals(selected)
+        document += ''.join(f'<td>{escape(str(totals[column]))}</td>' for column in columns) + '</tr>'
+    return document + '''</tfoot></table><script>
 document.getElementById('attribution-filter').addEventListener('change',function(){
  const value=this.value;
  document.querySelectorAll('#attribution-table tbody tr').forEach(function(row){
  row.hidden=!(value==='all'||row.dataset.result===value||row.dataset.side===value);
+ });
+ document.querySelectorAll('#attribution-table tfoot tr').forEach(function(row){
+ row.hidden=row.dataset.summaryFilter!==value;
  });
 });</script>'''
