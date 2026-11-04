@@ -63,6 +63,7 @@ def make_full_runner(config, *, rules=None):
             held_pending_policy_count=sum(t.state == "HELD_PENDING_POLICY" for t in executor.trades),
             assume_full_basket_fill=settings.assume_full_basket_fill,
             market_split_execution=settings.market_split_execution,
+            entry_at_signal_time=settings.entry_at_signal_time,
             redemption_price_locked_count=sum(t.redemption_prices_locked_at is not None for t in executor.trades),
             delayed_redemption_count=sum(bool(t.delayed_redemption) for t in executor.trades),
             priced_unpaid_cash_legs=sum(leg.final is not None and not leg.paid for t in executor.trades for leg in t.legs),
@@ -79,13 +80,24 @@ def make_full_runner(config, *, rules=None):
         if not period.pending_count and not any(account.positions.values()):
             if account.cash - account.starting_cash != period.settled_net_pnl:
                 raise AssertionError("Closed trade PnL reconciliation failed")
+        if settings.market_split_execution:
+            fill_policy = ("Entry BUY uses signal t exact permitted close; applications still wait for t+1. "
+                           if settings.entry_at_signal_time else "Entry uses signal t+1 exact permitted close. ")
+            fill_policy += ("Physical redemption exits use the application minute. SH proxies use the first tradable exact minute "
+                            "from application through pricing-deadline 15:00 inclusive; creation ETF exits retain the original later-minute policy.")
+        else:
+            fill_policy = ("Entry BUY uses signal t exact close; later application and exits retain their configured timing."
+                           if settings.entry_at_signal_time else "first strictly later permitted trading minute with an exact valid close")
         assumptions = dict(
             model="159338 SZ physical or optional creation cash substitution / SH cash substitution; research simulation",
             market_split_execution=settings.market_split_execution,
+            entry_at_signal_time=settings.entry_at_signal_time,
+            entry_timing=("Signal-time entry: redemption ETF BUY and creation physical stock BUY use the exact signal t close. Application stays on the next permitted minute (t+1 in market-split mode), redemption sales retain that application minute, and creation ETF sale follows the application on a later permitted minute. Signal-close execution is an explicit user research assumption."
+                          if settings.entry_at_signal_time else "Legacy entry: investor BUY orders use the next permitted exact close after the signal, with application after the complete basket is acquired."),
             premium_threshold=str(settings.premium_threshold), threshold_comparison="strict > +threshold / < -threshold",
             fees=asdict(settings.fees), fee_policy="User-specified rates. No minimum commission. Round each fee component per actual fill to cents, half up. Investor fees are separate cash events; manager fees enter substitution refunds/payables once. No execution fees on unfilled close valuations, security transfers or fixed PCF substitution amounts. SecurityTradingRule fee metadata is not separately charged.",
             signal_cost_policy="Estimate fees at currently observed prices, preserving the raw premium/discount trigger; estimated net edge is reported without adding an unrequested net-profit gate. Manager pending-value marks remain gross until actual proxy fills determine incurred fees.",
-            slippage="0", fills=("Entry uses signal t+1 exact permitted close. Physical redemption exits use that same application minute. SH proxies use the first tradable exact minute from application through pricing-deadline 15:00 inclusive; creation ETF exits retain the original later-minute policy." if settings.market_split_execution else "first strictly later permitted trading minute with an exact valid close"),
+            slippage="0", fills=fill_policy,
             liquidity="Own orders and SH first-tradable-minute proxies fill in full at an exact permitted close. max_shares_per_minute applies to scheduled SZ replacement proxies (all scheduled proxies in legacy mode). No volume data.",
             security_rule_policy=settings.security_rule_policy,
             creation_signal_gate="Positive-quantity real constituents that cannot be bought and forbid cash substitution block CREATE before signal emission. Zero-quantity rows and the aggregate cash placeholder do not block. REDEEM is unchanged.",

@@ -216,11 +216,16 @@ class ArbitrageSimulator:
                                                side=decision.side, etf_shares=plan.etf_shares)
         for symbol, quantity in entries.items():
             self._order(trade, symbol, "BUY", quantity, context.now, "ENTRY")
-        # An all-cash creation still waits for a later bar before applying.
+        if self.settings.entry_at_signal_time:
+            self._fill_full_basket(trade, context)
+        # Application remains on a later bar, including all-cash creation.
 
-    def _fill(self, order, trade, context, *, next_minute=False, sh_window=False):
+    def _fill(self, order, trade, context, *, next_minute=False, sh_window=False, at_signal=False):
         if not order.remaining or order.paused:
             return
+        if at_signal and (not self.settings.entry_at_signal_time or order.purpose != "ENTRY"
+                          or order.side != "BUY" or context.now != trade.decision.ts):
+            raise ValueError("Signal-time fills require a configured entry BUY at the signal timestamp")
         if next_minute:
             valid_redemption_exit = (trade.decision.side is Side.REDEEM and order.purpose == "EXIT"
                                      and order.symbol in trade.plan.physical)
@@ -250,7 +255,7 @@ class ArbitrageSimulator:
                     return
                 # Scheduled callback and regular clock may share a timestamp.
                 order.manager_attempted_at = context.now
-        block = self._can_trade(order, context, application_minute=next_minute or sh_window,
+        block = self._can_trade(order, context, application_minute=next_minute or sh_window or at_signal,
                                 sh_window=sh_window)
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
@@ -299,7 +304,8 @@ class ArbitrageSimulator:
                                basis=(("manager_next_minute_close_proxy" if context.now == trade.applied_at
                                        else "manager_first_tradable_close_proxy") if sh_window
                                       else "manager_scheduled_close_proxy")
-                                     if order.purpose == "MANAGER" else "next_minute_close"))
+                                     if order.purpose == "MANAGER" else
+                                     "signal_minute_close" if at_signal else "next_minute_close"))
         self.fee_rows.append(dict(ts=context.now, trade_id=trade.trade_id, order_id=order.order_id,
             symbol=order.symbol, side=order.side, purpose=order.purpose,
             turnover=quantity * bar.close, **asdict(fees), total=fees.total,
@@ -312,21 +318,29 @@ class ArbitrageSimulator:
         quotes. Contradictory inputs fail the run without a partial basket.
         Manager T+2 attempts retain their separately configured policy.
         """
-        if context.now <= trade.decision.ts:
+        at_signal = self.settings.entry_at_signal_time and context.now == trade.decision.ts
+        if context.now <= trade.decision.ts and not at_signal:
             return
-        if self.settings.market_split_execution and context.now != trade.decision.ts + timedelta(minutes=1):
+        if self.settings.market_split_execution and not at_signal and context.now != trade.decision.ts + timedelta(minutes=1):
             raise ValueError(f"Market-split next-minute application window missed: {trade.trade_id}")
-        if context.now.date() != trade.pcf.effective_date or not application_allowed(
-            trade.pcf, context.resources.rules.get(trade.pcf.etf_code, context.now.date()),
-            trade.decision.side, trade.decision.quantity_units, context.now.time()
+        application_at = context.now
+        if at_signal:
+            next_clock = next((clock for clock in context.resources.config.clock_times
+                               if clock > context.now.time() and self.trading_times.allows(clock)), None)
+            if next_clock is None:
+                raise ValueError(f"No later application minute after signal-time entry: {trade.trade_id}")
+            application_at = datetime.combine(context.now.date(), next_clock)
+        if application_at.date() != trade.pcf.effective_date or not application_allowed(
+            trade.pcf, context.resources.rules.get(trade.pcf.etf_code, application_at.date()),
+            trade.decision.side, trade.decision.quantity_units, application_at.time()
         ):
             raise ValueError(f"Full-basket assumption has no valid application: {trade.trade_id}")
         required = max(trade.plan.estimated_cash, ZERO)
         if trade.decision.side is Side.CREATE:
             required += trade.plan.substitution_deposit + trade.plan.domestic_fixed
-        entries = self._orders(trade, "ENTRY")
+        entries = [order for order in self._orders(trade, "ENTRY") if order.remaining]
         for order in entries:
-            block = self._can_trade(order, context)
+            block = self._can_trade(order, context, application_minute=at_signal)
             bar = self.prices.get(order.symbol, context.now, exact=True)
             if block or bar is None:
                 raise ValueError(f"Full-basket assumption lacks an executable entry: "
@@ -337,7 +351,7 @@ class ArbitrageSimulator:
             raise ValueError(f"Full-basket assumption cannot be funded: {trade.trade_id}; "
                              f"required={required}, available={self.account.cash}")
         for order in entries:
-            self._fill(order, trade, context)
+            self._fill(order, trade, context, at_signal=at_signal)
         self._apply(trade, context)
 
     def _apply(self, trade, context):
