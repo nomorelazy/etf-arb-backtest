@@ -27,6 +27,7 @@ class SimulationConfig:
     assume_full_basket_fill: bool = True
     fees: FeeRates = field(default_factory=FeeRates)
     market_split_execution: bool = True
+    entry_at_signal_time: bool = True
 
     def __post_init__(self):
         if isinstance(self.fees, dict):
@@ -61,3 +62,7 @@ class SimulationConfig:
             raise ValueError("market_split_execution must be a bool")
         if self.market_split_execution and not self.assume_full_basket_fill:
             raise ValueError("market_split_execution requires assume_full_basket_fill")
+        if type(self.entry_at_signal_time) is not bool:
+            raise ValueError("entry_at_signal_time must be a bool")
+        if self.entry_at_signal_time and not self.assume_full_basket_fill:
+            raise ValueError("entry_at_signal_time requires assume_full_basket_fill")

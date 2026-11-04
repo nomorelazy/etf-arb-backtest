@@ -221,10 +221,16 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                         "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"
                         f"本轮未结清套利数量峰值：{financial_summary['peak_open_cycles']} 笔。</p>")
         if financial_summary.get('market_split_execution'):
+            if financial_summary.get('entry_at_signal_time'):
+                details += ("<p>本轮买入时点：赎回买入 ETF、申购买入实物股票均使用信号 t 分钟的精确 close；"
+                            "t+1 分钟提交申赎，正常可交易的赎回股票在该分钟卖出；"
+                            "申购 ETF 在申请后的首个允许成交分钟卖出，通常为信号后的第 2 分钟。</p>")
             details += ("<p>沪深代买卖时点分离：沪市申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
                         "在首个可成交分钟使用精确 close 足额定价；期间逐分钟检查，含收盘最后一分钟。"
                         "整个窗口仍未成交的数量按 T+2 日精确收盘价估值，不伪造成交或收取成交税费。"
-                        "赎回买入 ETF 及卖出正常可交易深市实物股票使用信号后 t+1 分钟价格。"
+                        + ("赎回买入 ETF 使用信号 t 价格，正常可交易深市实物股票在 t+1 申请分钟卖出。"
+                           if financial_summary.get('entry_at_signal_time') else
+                           "赎回买入 ETF 及卖出正常可交易深市实物股票使用信号后 t+1 分钟价格。") +
                         "深市申购现金替代补券按配置的后续时点尝试，默认 T+2 日 14:30。"
                         "深市无法卖出的实物股票继续持有并等待后续可交易分钟。"
                         "成交、现金替代最终金额确认和实际到账分别记录。</p>"

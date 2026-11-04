@@ -39,7 +39,7 @@ class TradingTimeIntegrationTests(unittest.TestCase):
         self.clocks = (time(9,30),time(9,34),time(9,35),time(9,36),time(9,37),
                        time(11,27),time(11,28),time(13),time(14,55),time(14,56),time(14,57),time(14,58),time(15))
         self.config = replace(self.fixture.config, clock_times=self.clocks,
-                              simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", market_split_execution=False))
+                              simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", market_split_execution=False, entry_at_signal_time=False))
         self.rules = InMemoryRuleRepository([ETFRule("159338",DAYS[0],DAYS[-1],True,True,time(14,57),time(14,57))])
 
     def rows(self, etf_price):
