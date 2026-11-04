@@ -44,7 +44,7 @@ class SignalTimeEntryTests(unittest.TestCase):
     def run_model(self, rows=None, config=None):
         return self.fixture.run_model(self.rows() if rows is None else rows, config or self.config)
 
-    def test_creation_buys_at_signal_but_keeps_application_and_etf_exit_times(self):
+    def test_creation_buys_at_signal_and_sells_etf_in_application_minute(self):
         runner, summary = self.run_model()
         entry = next(f for f in runner.executor.fills if f['purpose'] == 'ENTRY')
         exit_fill = next(f for f in runner.executor.fills if f['purpose'] == 'EXIT')
@@ -54,14 +54,76 @@ class SignalTimeEntryTests(unittest.TestCase):
                          (self.signal, D('1'), 'signal_minute_close'))
         self.assertEqual(trade.applied_at, self.application)
         self.assertEqual((manager['ts'], manager['price']), (self.application, D('2.5')))
-        self.assertEqual((exit_fill['ts'], exit_fill['price']),
-                         (self.signal + timedelta(minutes=2), D('4.5')))
+        self.assertEqual((exit_fill['ts'], exit_fill['price']), (self.application, D('4.2')))
         row = self.read('trade_attribution.csv')[0]
         self.assertEqual(D(row['physical_price_effect']), D(0))
-        self.assertEqual(D(row['etf_price_effect']), D('50'))
+        self.assertEqual(D(row['etf_price_effect']), D('20'))
         self.assertTrue(summary['entry_at_signal_time'])
+        self.assertTrue(summary['creation_etf_sale_at_application'])
         self.assertEqual(runner.executor.account.cash - self.config.starting_cash, D(row['net_pnl']))
         self.assertEqual(len(runner.resources.portfolio.to_rows()[0]), 6)
+
+    def test_later_etf_prices_do_not_change_creation_profit_after_t_plus_one_sale(self):
+        outcomes = []
+        for future_price in (0.01, 100):
+            rows = [(ts, symbol, future_price if symbol == '159338.SZ' and ts > self.application else price)
+                    for ts, symbol, price in self.rows()]
+            config = replace(self.config, output_dir=self.fixture.root / str(future_price))
+            runner, summary = self.run_model(rows, config)
+            outcomes.append((summary['final_net_pnl'], runner.executor.fills, runner.executor.fee_rows))
+        self.assertEqual(outcomes[0], outcomes[1])
+
+    def test_missing_t_plus_one_etf_close_keeps_holding_until_an_actual_sale(self):
+        rows = [r for r in self.rows() if (r[0], r[1]) != (self.application, '159338.SZ')]
+        config = replace(self.config, quality_check=False)
+        runner, _ = self.run_model(rows, config)
+        sale = next(f for f in runner.executor.fills if f['purpose'] == 'EXIT')
+        self.assertEqual(sale['ts'], self.signal + timedelta(minutes=2))
+        self.assertEqual(sale['price'], D('4.5'))
+        self.assertFalse(any(f['symbol'] == '159338.SZ' and f['ts'] == self.application
+                             for f in runner.executor.fills))
+        self.assertEqual(D(self.read('trade_attribution.csv', config)[0]['etf_price_effect']), D('50'))
+
+    def test_creation_etf_sell_permission_is_enforced_and_holding_is_not_faked(self):
+        self.fixture.rules.add(SecurityTradingRule('159338.SZ', fixtures.DAYS[0], fixtures.DAYS[0], True, False))
+        self.fixture.rules.add(SecurityTradingRule('159338.SZ', fixtures.DAYS[1], fixtures.DAYS[-1], True, True))
+        runner, _ = self.run_model()
+        sale = next(f for f in runner.executor.fills if f['purpose'] == 'EXIT')
+        self.assertEqual(sale['ts'].date(), fixtures.DAYS[1])
+        self.assertEqual(runner.executor.daily[0]['holdings_value'], D('450'))
+
+    def test_creation_can_sell_at_1457_without_waiting_overnight(self):
+        clocks = (time(14, 56), time(14, 57), time(15))
+        rows = [(datetime.combine(day, clock), symbol,
+                 (4 if clock == clocks[0] else 4.2) if symbol == '159338.SZ' else price)
+                for day in fixtures.DAYS for clock in clocks
+                for symbol, price in (('159338.SZ', 0), ('000001.SZ', 1), ('600000.SH', 2))]
+        self.fixture.rules = InMemoryRuleRepository([
+            ETFRule('159338', fixtures.DAYS[0], fixtures.DAYS[-1], True, True,
+                    time(14, 57), time(14, 57))])
+        config = replace(self.config, clock_times=clocks, simulation=replace(self.settings,
+            trading_sessions=(('09:35', '11:27'), ('13:00', '14:57'))))
+        runner, summary = self.run_model(rows, config)
+        sale = next(f for f in runner.executor.fills if f['purpose'] == 'EXIT')
+        self.assertEqual(sale['ts'], datetime.combine(fixtures.DAYS[0], time(14, 57)))
+        self.assertEqual(runner.executor.trades[0].applied_at, sale['ts'])
+        self.assertEqual(summary['pending_count'], 0)
+
+    def test_creation_etf_sale_is_full_and_its_fee_is_charged_only_once(self):
+        config = replace(self.config, simulation=replace(self.settings, max_shares_per_minute=40))
+        runner, _ = self.run_model(config=config)
+        sales = [f for f in runner.executor.fills if f['symbol'] == '159338.SZ']
+        fees = [f for f in runner.executor.fee_rows if f['symbol'] == '159338.SZ']
+        self.assertEqual(len(sales), 1)
+        self.assertEqual((sales[0]['ts'], sales[0]['quantity'], sales[0]['price']),
+                         (self.application, 100, D('4.2')))
+        self.assertEqual(len(fees), 1)
+        self.assertEqual((fees[0]['ts'], fees[0]['turnover'], fees[0]['total']),
+                         (self.application, D('420'), D('0.04')))
+        movements = [r['quantity_delta'] for r in runner.executor.account.rows
+                     if r['ts'] == self.application and r['symbol'] == '159338.SZ' and r['quantity_delta']]
+        self.assertEqual(movements, [100, -100])  # Shares must arrive before the sale.
+        self.assertEqual(runner.executor.account.holdings('T000001'), {})
 
     def test_redemption_etf_buy_at_signal_and_both_stock_sales_at_t_plus_one(self):
         runner, summary = self.run_model(self.rows(Side.REDEEM))
@@ -157,13 +219,16 @@ class SignalTimeEntryTests(unittest.TestCase):
         self.assertEqual(runner.executor.trades[0].applied_at, self.application)
 
     def test_new_timing_keeps_pending_settlement_and_original_opening_date(self):
-        config = replace(self.config, simulation=replace(self.settings,
-            cash_substitution_lag=None, cash_difference_lag=None))
-        runner, summary = self.run_model(self.rows(Side.REDEEM), config)
-        self.assertIsNone(summary['final_net_pnl'])
-        self.assertEqual(summary['pending_count'], 1)
-        self.assertEqual(self.read('trade_attribution.csv', config)[0]['net_pnl'], '')
-        self.assertEqual(runner.resources.portfolio.trades[0].opened_at, self.signal)
+        for side in (Side.CREATE, Side.REDEEM):
+            config = replace(self.config, output_dir=self.fixture.root / side.value,
+                             simulation=replace(self.settings,
+                                 cash_substitution_lag=None, cash_difference_lag=None))
+            runner, summary = self.run_model(self.rows(side), config)
+            self.assertIsNone(summary['final_net_pnl'])
+            self.assertEqual(summary['pending_count'], 1)
+            self.assertEqual(self.read('trade_attribution.csv', config)[0]['net_pnl'], '')
+            self.assertEqual(runner.resources.portfolio.trades[0].opened_at, self.signal)
+            self.assertEqual(runner.executor.account.holdings('T000001'), {})
 
     def test_interval_still_starts_at_application_not_the_earlier_buy(self):
         clocks = (time(9, 30), time(9, 31), time(9, 32), time(10, 30), time(10, 31), time(10, 32), time(15))
@@ -177,11 +242,19 @@ class SignalTimeEntryTests(unittest.TestCase):
         self.assertEqual([t.applied_at.time() for t in runner.executor.trades], [time(9, 31), time(10, 32)])
 
     def test_explicit_false_retains_legacy_next_minute_entry(self):
-        config = replace(self.config, simulation=replace(self.settings, entry_at_signal_time=False))
-        runner, _ = self.run_model(self.fixture.market_rows(3.2, 3.1), config)
-        entry = next(f for f in runner.executor.fills if f['purpose'] == 'ENTRY')
-        self.assertEqual((entry['ts'], entry['price'], entry['basis']),
-                         (self.application, D('3.1'), 'next_minute_close'))
+        for side in (Side.CREATE, Side.REDEEM):
+            config = replace(self.config, output_dir=self.fixture.root / side.value,
+                             simulation=replace(self.settings, entry_at_signal_time=False))
+            rows = self.rows() if side is Side.CREATE else self.fixture.market_rows(3.2, 3.1)
+            runner, summary = self.run_model(rows, config)
+            entry = next(f for f in runner.executor.fills if f['purpose'] == 'ENTRY')
+            self.assertEqual((entry['ts'], entry['basis']), (self.application, 'next_minute_close'))
+            self.assertFalse(summary['creation_etf_sale_at_application'])
+            if side is Side.CREATE:
+                sale = next(f for f in runner.executor.fills if f['purpose'] == 'EXIT')
+                self.assertEqual(sale['ts'], self.signal + timedelta(minutes=2))
+            else:
+                self.assertEqual(entry['price'], D('3.1'))
 
     def test_signal_buy_requires_cash_including_fees_and_application_reserve(self):
         for side, cash in ((Side.CREATE, D('383.01')), (Side.REDEEM, D('320'))):
@@ -231,6 +304,8 @@ class SignalTimeEntryTests(unittest.TestCase):
         report = (self.config.output_dir / 'report/report.html').read_text(encoding='utf-8')
         self.assertIn('信号 t 分钟的精确 close', report)
         self.assertIn('t+1 分钟提交申赎', report)
+        self.assertTrue(assumptions['creation_etf_sale_at_application'])
+        self.assertIn('申购 ETF 在 t+1 分钟提交申购并取得份额后', report)
 
 
 if __name__ == '__main__':
