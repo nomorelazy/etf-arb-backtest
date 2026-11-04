@@ -224,7 +224,10 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
             if financial_summary.get('entry_at_signal_time'):
                 details += ("<p>本轮买入时点：赎回买入 ETF、申购买入实物股票均使用信号 t 分钟的精确 close；"
                             "t+1 分钟提交申赎，正常可交易的赎回股票在该分钟卖出；"
-                            "申购 ETF 在申请后的首个允许成交分钟卖出，通常为信号后的第 2 分钟。</p>")
+                            + ("申购 ETF 在 t+1 分钟提交申购并取得份额后，在同一分钟按精确 close 卖出。"
+                               if financial_summary.get('creation_etf_sale_at_application') else
+                               "申购 ETF 在申请后的首个允许成交分钟卖出，通常为信号后的第 2 分钟。")
+                            + "缺精确卖价或不允许卖出时保留持仓，按后续实际成交记录，不伪造 t+1 成交。</p>")
             details += ("<p>沪深代买卖时点分离：沪市申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
                         "在首个可成交分钟使用精确 close 足额定价；期间逐分钟检查，含收盘最后一分钟。"
                         "整个窗口仍未成交的数量按 T+2 日精确收盘价估值，不伪造成交或收取成交税费。"

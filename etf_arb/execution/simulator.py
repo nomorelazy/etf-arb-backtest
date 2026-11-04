@@ -229,7 +229,10 @@ class ArbitrageSimulator:
         if next_minute:
             valid_redemption_exit = (trade.decision.side is Side.REDEEM and order.purpose == "EXIT"
                                      and order.symbol in trade.plan.physical)
-            if (not self.settings.market_split_execution or not valid_redemption_exit
+            valid_creation_exit = (self.settings.entry_at_signal_time and trade.decision.side is Side.CREATE
+                                   and order.purpose == "EXIT" and order.symbol == "159338.SZ"
+                                   and order.side == "SELL")
+            if (not self.settings.market_split_execution or not (valid_redemption_exit or valid_creation_exit)
                     or trade.applied_at != context.now
                     or context.now != trade.decision.ts + timedelta(minutes=1)):
                 raise ValueError("Next-minute fills require a confirmed market-split t+1 application")
@@ -422,9 +425,10 @@ class ArbitrageSimulator:
             self._order(trade, symbol, "BUY" if side is Side.CREATE else "SELL", quantity, now, "MANAGER")
         if self.settings.market_split_execution:
             self._attempt_sh_substitution(trade, context)
-            if side is Side.REDEEM:
+            if side is Side.REDEEM or self.settings.entry_at_signal_time:
                 for order in self._orders(trade, "EXIT"):
                     self._fill(order, trade, context, next_minute=True)
+            if side is Side.REDEEM:
                 for order in self._orders(trade):
                     if order.remaining:
                         trade.delayed_redemption[order.symbol] = order.last_block
@@ -601,7 +605,7 @@ class ArbitrageSimulator:
                 continue
             if trade.state == "BUILD" and self.settings.assume_full_basket_fill:
                 self._fill_full_basket(trade, context)
-                continue  # Received assets still sell only on a later minute.
+                continue  # Application has already attempted any configured same-minute exits.
             for order in self._orders(trade):
                 self._fill(order, trade, context)
             if trade.state == "BUILD":
