@@ -88,6 +88,14 @@ class ArbitrageSimulator:
             asset_type=AssetType.ETF if symbol == "159338.SZ" else AssetType.STOCK,
             side=side, turnover=quantity * price)
 
+    def _application_cash_due(self, plan, side):
+        if self.settings.estimated_cash_interim_settlement:
+            component_due = plan.estimated_cash if side is Side.CREATE else -plan.estimated_cash
+        else:
+            component_due = max(plan.estimated_cash, ZERO)
+        return component_due + (plan.substitution_deposit + plan.domestic_fixed
+                                if side is Side.CREATE else ZERO)
+
     def available(self, at):
         # A pending signal has not started creation/redemption yet. Wait for
         # that actual application timestamp before starting its hourly clock.
@@ -127,7 +135,17 @@ class ArbitrageSimulator:
                         context.pcfs[trade.pcf.etf_code], trade.applied_at.date(), trade.decision.side,
                         trade.decision.quantity_units, trade.cash_deposit,
                         context.resources.config.trading_days, self.settings.cash_difference_lag,
+                        interim_settlement=self.settings.estimated_cash_interim_settlement,
                     )
+                    if (self.settings.estimated_cash_interim_settlement and leg.kind == "cash_difference"
+                            and leg.final is not None and not leg.paid and leg.payment_at is None
+                            and leg.due == context.now.date()):
+                        clock = next((t for t in context.resources.config.clock_times
+                                      if self.trading_times.allows(t)), None)
+                        if clock is not None:
+                            context.schedule(datetime.combine(context.now.date(), clock),
+                                lambda ctx, t=trade, l=leg: self._record_payment(t, l, ctx),
+                                f"cash.next_day_adjustment.{trade.trade_id}")
 
     def _can_trade(self, order, context, *, application_minute=False, sh_window=False):
         now = context.now
@@ -181,9 +199,7 @@ class ArbitrageSimulator:
             self.rejections.append(dict(ts=context.now, reason="no_exact_next_minute_for_market_split"))
             return
         entries = plan.physical if decision.side is Side.CREATE else {"159338.SZ": plan.etf_shares}
-        needed = max(plan.estimated_cash, ZERO)
-        if decision.side is Side.CREATE:
-            needed += plan.substitution_deposit + plan.domestic_fixed
+        needed = max(self._application_cash_due(plan, decision.side), ZERO)
         for symbol, quantity in entries.items():
             bar = self.prices.get(symbol, context.now, exact=True)
             if bar is None:
@@ -262,9 +278,7 @@ class ArbitrageSimulator:
             quantity = min(quantity, cap)
         if order.purpose != "MANAGER":
             if order.side == "BUY":
-                floor = max(trade.plan.estimated_cash, ZERO)
-                if trade.decision.side is Side.CREATE:
-                    floor += trade.plan.substitution_deposit + trade.plan.domestic_fixed
+                floor = max(self._application_cash_due(trade.plan, trade.decision.side), ZERO)
                 available = max(ZERO, self.account.cash - floor)
                 if self.settings.assume_full_basket_fill:
                     required = quantity * bar.close + self._fee_for(order.symbol, "BUY", quantity, bar.close).total
@@ -321,9 +335,14 @@ class ArbitrageSimulator:
             trade.decision.side, trade.decision.quantity_units, context.now.time()
         ):
             raise ValueError(f"Full-basket assumption has no valid application: {trade.trade_id}")
-        required = max(trade.plan.estimated_cash, ZERO)
-        if trade.decision.side is Side.CREATE:
-            required += trade.plan.substitution_deposit + trade.plan.domestic_fixed
+        if trade.decision.side is Side.REDEEM and self.settings.redemption_sales_at_next_minute:
+            for symbol in trade.plan.physical | trade.plan.manager:
+                block = security_trade_block(context.resources.rules, symbol, context.now, "SELL",
+                                             self.settings.security_rule_policy)
+                if block or self.prices.get(symbol, context.now, exact=True) is None:
+                    raise ValueError(f"Next-minute redemption lacks an executable sale: "
+                                     f"{trade.trade_id}/{symbol}: {block or 'missing_exact_bar'}")
+        required = max(self._application_cash_due(trade.plan, trade.decision.side), ZERO)
         entries = self._orders(trade, "ENTRY")
         for order in entries:
             block = self._can_trade(order, context)
@@ -352,8 +371,8 @@ class ArbitrageSimulator:
         ):
             self._hold(trade, context, "application_cutoff_or_disabled")
             return
-        deposit = max(plan.estimated_cash, ZERO)
-        due_cash = deposit + (plan.substitution_deposit + plan.domestic_fixed if side is Side.CREATE else ZERO)
+        deposit = plan.estimated_cash if self.settings.estimated_cash_interim_settlement else max(plan.estimated_cash, ZERO)
+        due_cash = self._application_cash_due(plan, side)
         if self.account.cash < due_cash:
             self._hold(trade, context, "insufficient_application_cash")
             return
@@ -366,16 +385,19 @@ class ArbitrageSimulator:
                 self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol=symbol, quantity=-quantity)
             self.account.post(now, trade.trade_id, Event.SECURITIES_AVAILABLE, symbol="159338.SZ", quantity=plan.etf_shares)
             self._order(trade, "159338.SZ", "SELL", plan.etf_shares, now, "EXIT")
-            cash_estimate = deposit - plan.estimated_cash
+            cash_estimate = ZERO if self.settings.estimated_cash_interim_settlement else deposit - plan.estimated_cash
             sub_estimate = plan.substitution_deposit - self._manager_value(trade, now)
         else:
             self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol="159338.SZ", quantity=-plan.etf_shares)
             for symbol, quantity in plan.physical.items():
                 self.account.post(now, trade.trade_id, Event.SECURITIES_AVAILABLE, symbol=symbol, quantity=quantity)
                 self._order(trade, symbol, "SELL", quantity, now, "EXIT")
-            cash_estimate = deposit + plan.estimated_cash
+            cash_estimate = ZERO if self.settings.estimated_cash_interim_settlement else deposit + plan.estimated_cash
             sub_estimate = self._manager_value(trade, now) + plan.domestic_fixed
         trade.legs = [CashLeg("cash_difference", cash_estimate), CashLeg("cash_substitution", sub_estimate)]
+        if self.settings.estimated_cash_interim_settlement:
+            trade.legs[0].estimated_component = plan.estimated_cash
+            trade.legs[0].initial_cash_flow = -plan.estimated_cash if side is Side.CREATE else plan.estimated_cash
         sub = trade.legs[1]
         sub.pricing_deadline, sub.notice_due_on, sub.latest_payment_on = self.cash_timing.dates(
             now.date(), context.resources.config.trading_days,

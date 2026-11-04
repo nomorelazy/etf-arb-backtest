@@ -137,7 +137,7 @@ python -m etf_arb.cli backtest --config configs/full_flow.example.json --premium
 深市申购中无法买入、已转现金替代的股票仍统一等到 **T+2 日 14:30** 补券，即使此前已恢复可买也不提前。
 固定替代直接读取 PCF，不生成买卖订单。该模式要求 `assume_full_basket_fill=true`，
 缺下一允许 Runner 分钟不发起，午休或隔夜不能算作 t+1 分钟；
-显式设置 `market_split_execution=false` 可复现旧版所有代买卖统一 T+2 的实验。
+显式设置 `market_split_execution=false` 且 `redemption_sales_at_next_minute=false` 可复现旧版所有代买卖统一 T+2 的实验；旧预估现金流程另需 `estimated_cash_interim_settlement=false`。
 申购退补款为汇总保证金减模拟购入金额，赎回收入为模拟卖出金额。
 普通研究情形下，`cash_substitution_pricing_days=2` 将定价期限与付款分开：
 `cash_substitution_attempt_time="14:30"` 指定深市补券尝试时点（旧模式作用于全部代买卖）。
@@ -154,18 +154,24 @@ T+2 日 15:00 先检查是否能成交，再将整个窗口均未成交的数量
 说明书普通情形下，T+2 后首个工作日内发送退补明细，款项在此后 3 个工作日内交收；
 通知期限、最迟交收期限都不等于实际到账。配置 `settlement_business_days` 提供明确工作日历，
 用于计算 `notice_due_on` 与 `latest_payment_on`；未提供时不把交易所日历冒充结算工作日历。
-默认 `cash_substitution_lag=null`、`cash_difference_lag=null`，资金只有在已提供的付款时点才入账。
+默认 `cash_substitution_lag=null`，现金替代退补款只有在已提供的付款时点才入账。
+预估现金新模式默认 `estimated_cash_interim_settlement=true`：当日按带正负号的 E 交割，次日按实际 A 找补。
+申购为当日 −E、次日 E−A；赎回为当日 +E、次日 A−E，E/A 均已乘申赎单位。
+`cash_difference_lag=null` 且没有实际付款时间时，在 T+1 首个允许 Runner 分钟模拟收付，标记 `next_day_adjustment_research`；
+这项用户研究时点与说明书 T+1 清算、T+2 交收分别说明。提供实际付款时间或显式 lag 则按该记录/研究覆盖处理。
 旧式整数 lag 仍可显式启用研究情景，报告会标记 `explicit_research_lag`，不会冒充说明书交收保证。
 
 `cash_payment_dates_path` 可指定 JSON 文件，其每条记录为
 `{"trade_id":"T000001","kind":"cash_substitution","paid_at":"2025-01-07T09:00:00"}`。
 `kind` 也可为 `cash_difference`。日期只是格式示例，须按实际记录填写；付款事件在其真实时间推进，
 不受套利发起窗口限制。时点在当前运行日历以外、款项金额未确定或资金不足时，不标成已收付。
-默认没有付款记录，因此定价完成的款项仍会待交收，不会自动释放资金或开启下一笔。
+没有付款记录时，现金替代退补款仍会待交收；预估现金的次日找补按上述独立研究规则处理。
 
 现金差额仅在后续 PCF 的 `PreTradingDay` 等于原申请日时读取其 `CashComponent`；
 不会把申请日清单里的历史现金差额用于本次交易。金额确认和实际到账分别保存，
-缺少最终差额、付款记录或尾期不够时保持待结算，`final_net_pnl=null`。
+新模式同时要求 PCF 为明确日历的 T+1，缺少次日实际金额、日期不匹配或尾期不够则待结算，不用更晚清单替代。
+`cash_settlements.csv` 记录 `estimated_component`、`actual_component`、`component_difference`、`initial_cash_flow` 及实际找补金额/时间；六列账本不变。
+`estimated_cash_interim_settlement=false` 可复现旧双向正预估保证金模式。
 
 当前按用户 2026-10-21 最新选择，默认 `assume_full_basket_fill=true`：假设全部订单可以组齐，
 信号后的首个允许分钟先校验整篮，再足额买入和提交申赎，按对应成交金额、替代保证金及预估现金扣账。
@@ -177,7 +183,7 @@ T+2 日 15:00 先检查是否能成交，再将整个窗口均未成交的数量
 缺少成交量和盘口，不能据此判断真实成交能力。
 
 2026-10-28 用户补充：赎回买入 ETF、提交赎回、卖出沪市及深市股票均使用信号后 t+1 分钟精确 close，正常可交易股票的价差在该分钟锁定。申购 ETF 退出仍沿用申请后更晚分钟成交。
-缺精确卖价或规则禁卖时，不伪造立即成交；深市实物股票继续持有并在后续允许分钟重试，沪市代理在申请至 T+2 收盘的窗口继续逐分钟寻找首个可成交时点。
+默认 `redemption_sales_at_next_minute=true`：买入 ETF 前统一检查沪深股票 t+1 卖价与 SELL 许可，缺行情/禁卖则在入场前报错，不用后续价格替代。显式 false 才保留深市实物持仓延后卖出和沪市窗口内代卖的旧路径。
 逐笔输出 `redemption_prices_locked_at` 和 `delayed_redemption_components`，报告区分已完全锁价与含延迟卖出的赎回。
 沪市按首个可成交分钟定价后，最终现金替代金额仍在原定价期限确认，实际付款依旧独立。
 `orders.csv` 分别记录 `next_minute_attempted_at` 和 `manager_attempted_at` 及沪市 `last_sh_attempted_at`，
@@ -434,3 +440,5 @@ python -m etf_arb.cli report-attribution --run-dir "reports\原运行目录" --o
 4. 159338 以外 ETF 的执行计划，以及非交易日资金事件的日历调度。
 
 现有研究流程可以运行，但缺失的交收输入会保留待结状态；模拟成交与估值不能解释为真实可实现收益。
+
+赎回最新选择：默认 `redemption_sales_at_next_minute=true`，要求 `market_split_execution=true`。所有沪深正常股票按信号后 t+1 精确 close 卖出；ETF 买入前统一检查该分钟卖出行情及许可，缺失/禁卖则在入场前报错。显式 false 保留允许延迟卖出的旧研究路径。申购代买和补券时点独立。

@@ -18,8 +18,8 @@ class SimulationConfig:
     trading_sessions: tuple[tuple[str, str], ...] = (("09:35", "11:27"), ("13:00", "14:57"))
     cash_substitution_pricing_days: int = 2
     cash_substitution_attempt_time: str = "14:30"
-    # Optional, explicit research overrides only. None requires a supplied
-    # payment timestamp and never equates a notice/deadline with received cash.
+    # Explicit research lag overrides. Substitution None requires a payment
+    # timestamp; interim cash-difference mode instead defaults to T+1 adjustment.
     cash_substitution_lag: int | None = None
     cash_difference_lag: int | None = None
     max_shares_per_minute: int | None = None
@@ -27,6 +27,8 @@ class SimulationConfig:
     assume_full_basket_fill: bool = True
     fees: FeeRates = field(default_factory=FeeRates)
     market_split_execution: bool = True
+    estimated_cash_interim_settlement: bool = True
+    redemption_sales_at_next_minute: bool = True
 
     def __post_init__(self):
         if isinstance(self.fees, dict):
@@ -61,3 +63,8 @@ class SimulationConfig:
             raise ValueError("market_split_execution must be a bool")
         if self.market_split_execution and not self.assume_full_basket_fill:
             raise ValueError("market_split_execution requires assume_full_basket_fill")
+        for name in ("estimated_cash_interim_settlement", "redemption_sales_at_next_minute"):
+            if type(getattr(self, name)) is not bool:
+                raise ValueError(f"{name} must be a bool")
+        if self.redemption_sales_at_next_minute and not self.market_split_execution:
+            raise ValueError("redemption_sales_at_next_minute requires market_split_execution")
