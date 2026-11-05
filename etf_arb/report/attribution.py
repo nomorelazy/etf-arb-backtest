@@ -190,15 +190,30 @@ def attribution_totals(rows):
 
 
 def attribution_html(rows):
-    creation_count = sum(row['side'] == 'CREATE' for row in rows)
-    redemption_count = sum(row['side'] == 'REDEEM' for row in rows)
+    groups = {
+        'all': rows,
+        'loss': [row for row in rows if decimal(row.get('net_pnl')) is not None and decimal(row['net_pnl']) < 0],
+        'create': [row for row in rows if row['side'] == 'CREATE'],
+        'redeem': [row for row in rows if row['side'] == 'REDEEM'],
+    }
+    totals = {name: attribution_totals(selected) for name, selected in groups.items()}
+    creation_count = len(groups['create'])
+    redemption_count = len(groups['redeem'])
     counts = (f'<p id="trade-counts"><strong>申购 {creation_count} 笔，赎回 {redemption_count} 笔，'
               f'合计 {len(rows)} 笔。</strong>按本轮实际发起的套利统计。</p>')
+    net_column = REPORT_COLUMNS['net_pnl']
+    direction_pnl = (
+        '<p id="direction-pnl-summary"><strong>申购总盈亏（元）：</strong>'
+        f'<span id="creation-net-pnl">{escape(totals["create"][net_column])}</span>；'
+        '<strong>赎回总盈亏（元）：</strong>'
+        f'<span id="redemption-net-pnl">{escape(totals["redeem"][net_column])}</span>。</p>'
+        '<p>按本轮全部交易的最终净盈亏分别汇总，不随下方筛选变化；'
+        '存在未结清交易时，仅显示已结清合计并注明未确定笔数。</p>')
     if not rows:
-        return '<h2>逐笔价差与现金盈亏</h2>' + counts + '<p>本轮没有已发起交易。</p>'
+        return '<h2>逐笔价差与现金盈亏</h2>' + counts + direction_pnl + '<p>本轮没有已发起交易。</p>'
     shown = [display_row(r) for r in rows]
     columns = list(shown[0])
-    document = '<h2 id="trade-attribution">逐笔价差与现金盈亏</h2>' + counts + '''
+    document = '<h2 id="trade-attribution">逐笔价差与现金盈亏</h2>' + counts + direction_pnl + '''
 <p>现金替代价格盈亏＝相对信号估值的价格变化，已包含代理税费；退补款／应收款是资金收付，不等于利润。
 预估现金影响：申购 E−A、赎回 A−E。已结清交易满足：信号毛价差＋ETF价格影响＋实物股票价格影响＋现金替代价格盈亏＋预估现金影响−投资者税费＝净盈亏。
 税费总额不再重复扣减；尚未确定的金额不填零。</p>
@@ -227,17 +242,10 @@ def attribution_html(rows):
             document += '<td>' + value + '</td>'
         document += '</tr>'
     document += '</tbody><tfoot>'
-    groups = {
-        'all': rows,
-        'loss': [row for row in rows if decimal(row.get('net_pnl')) is not None and decimal(row['net_pnl']) < 0],
-        'create': [row for row in rows if row['side'] == 'CREATE'],
-        'redeem': [row for row in rows if row['side'] == 'REDEEM'],
-    }
-    for name, selected in groups.items():
+    for name, group_totals in totals.items():
         hidden = '' if name == 'all' else ' hidden'
         document += f'<tr data-summary-filter="{name}"{hidden}>'
-        totals = attribution_totals(selected)
-        document += ''.join(f'<td>{escape(str(totals[column]))}</td>' for column in columns) + '</tr>'
+        document += ''.join(f'<td>{escape(str(group_totals[column]))}</td>' for column in columns) + '</tr>'
     return document + '''</tfoot></table><script>
 document.getElementById('attribution-filter').addEventListener('change',function(){
  const value=this.value;
