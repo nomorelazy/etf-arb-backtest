@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 import test_full_flow as fixtures
+from test_report_totals import FooterParser
 from etf_arb.cli import main
 from etf_arb.costs import FeeRates
 from etf_arb.report.attribution import SIGNAL_BASIS_FIELDS, build_trade_attribution
@@ -68,6 +69,10 @@ class ReportAttributionTests(unittest.TestCase):
                 self.assertEqual(summary['creation_count'], int(side == 'CREATE'))
                 self.assertEqual(summary['redemption_count'], int(side == 'REDEEM'))
                 self.assertIn('申购 1 笔，赎回 0 笔' if side == 'CREATE' else '申购 0 笔，赎回 1 笔', report)
+                self.assertEqual(FooterParser(report).direction_pnl, {
+                    'creation-net-pnl': f'{D(row["net_pnl"]):,.2f}' if side == 'CREATE' else '0.00',
+                    'redemption-net-pnl': f'{D(row["net_pnl"]):,.2f}' if side == 'REDEEM' else '0.00',
+                })
                 self.assertNotIn('已结清套利六列账本（按发起时间）', report)
                 self.assertNotIn('max-height:650px', report)
                 self.assertNotIn('overflow:auto', report)
@@ -152,6 +157,10 @@ class ReportAttributionTests(unittest.TestCase):
         self.assertEqual(row['cash_substitution_paid_at'], '')
         self.assertNotEqual(row['cash_substitution_pnl'], '')
         self.assertEqual(row['attribution_status'], '待结清')
+        report = (config.output_dir / 'report/report.html').read_text(encoding='utf-8')
+        self.assertEqual(FooterParser(report).direction_pnl, {
+            'creation-net-pnl': '未确定（1 笔）', 'redemption-net-pnl': '0.00',
+        })
 
     def test_missing_deadline_quote_keeps_unpriced_amount_blank(self):
         rows = [r for r in self.fixture.market_rows() if not (
@@ -181,6 +190,8 @@ class ReportAttributionTests(unittest.TestCase):
             self.assertEqual(main(), 0)
         self.assertEqual(read_rows(output / 'trade_attribution.csv'), expected)
         self.assertEqual(read_rows(output / 'metrics.csv'), read_rows(run / 'report/metrics.csv'))
+        self.assertEqual(FooterParser((output / 'report.html').read_text(encoding='utf-8')).direction_pnl,
+                         FooterParser((run / 'report/report.html').read_text(encoding='utf-8')).direction_pnl)
         self.assertEqual(json.loads((output / 'report_source.json').read_text(encoding='utf-8'))['trade_count'], 1)
         self.assertEqual(hashes, {p: hashlib.sha256(p.read_bytes()).hexdigest() for p in hashes})
         with self.assertRaisesRegex(ValueError, 'not empty'):
