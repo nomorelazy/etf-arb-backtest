@@ -70,6 +70,7 @@ class ArbitrageSimulator:
         self.fee_model = TradeFeeModel(settings.fees)
         self.account = None
         self.trades, self.orders, self.fills, self.rejections = [], [], [], []
+        self._orders_by_trade: dict[str, list[SimOrder]] = {}
         self.equity_curve, self.daily, self.marks = [], [], {}
         self.started_by_day = {}
         self.frequency = TradeFrequencyRule(settings.min_trade_interval_minutes, settings.max_trades_per_day)
@@ -99,12 +100,14 @@ class ArbitrageSimulator:
 
     def _order(self, trade, symbol, side, quantity, now, purpose, not_before=None):
         if quantity:
-            self.orders.append(SimOrder(f"O{len(self.orders)+1:07}", trade.trade_id, symbol, side,
-                                        quantity, now, purpose, not_before or now.date()))
+            order = SimOrder(f"O{len(self.orders)+1:07}", trade.trade_id, symbol, side,
+                             quantity, now, purpose, not_before or now.date())
+            self.orders.append(order)
+            self._orders_by_trade.setdefault(trade.trade_id, []).append(order)
 
     def _orders(self, trade, purpose=None):
-        return [o for o in self.orders if o.trade_id == trade.trade_id
-                and (purpose is None or o.purpose == purpose)]
+        orders = self._orders_by_trade.get(trade.trade_id, ())
+        return list(orders) if purpose is None else [order for order in orders if order.purpose == purpose]
 
     def on_day_open(self, context):
         if self.account is None:
