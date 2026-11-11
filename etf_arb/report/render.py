@@ -228,17 +228,22 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                                if financial_summary.get('creation_etf_sale_at_application') else
                                "申购 ETF 在申请后的首个允许成交分钟卖出，通常为信号后的第 2 分钟。")
                             + "缺精确卖价或不允许卖出时保留持仓，按后续实际成交记录，不伪造 t+1 成交。</p>")
-            details += ("<p>沪深代买卖时点分离：沪市申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
+            listed_in_sh = str(financial_summary.get('etf_code', '159338')).startswith('5')
+            domestic_market, proxy_market = ('沪市', '深市') if listed_in_sh else ('深市', '沪市')
+            details += (f"<p>沪深代买卖时点分离：{proxy_market}跨市场申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
                         "在首个可成交分钟使用精确 close 足额定价；期间逐分钟检查，含收盘最后一分钟。"
                         "整个窗口仍未成交的数量按 T+2 日精确收盘价估值，不伪造成交或收取成交税费。"
-                        + ("赎回买入 ETF 使用信号 t 价格，正常可交易深市实物股票在 t+1 申请分钟卖出。"
+                        + (f"赎回买入 ETF 使用信号 t 价格，正常可交易{domestic_market}实物股票在 t+1 申请分钟卖出。"
                            if financial_summary.get('entry_at_signal_time') else
-                           "赎回买入 ETF 及卖出正常可交易深市实物股票使用信号后 t+1 分钟价格。") +
-                        "深市申购现金替代补券按配置的后续时点尝试，默认 T+2 日 14:30。"
-                        "深市无法卖出的实物股票继续持有并等待后续可交易分钟。"
+                           f"赎回买入 ETF 及卖出正常可交易{domestic_market}实物股票使用信号后 t+1 分钟价格。") +
+                        f"{domestic_market}可选申购现金替代补券按配置的后续时点尝试，默认 T+2 日 14:30。"
+                        f"{domestic_market}无法卖出的实物股票继续持有并等待后续可交易分钟。"
                         "成交、现金替代最终金额确认和实际到账分别记录。</p>"
                         f"<p>赎回全部股票已在 t+1 锁价：{financial_summary.get('redemption_price_locked_count', 0)} 笔；"
                         f"含延迟卖出部分：{financial_summary.get('delayed_redemption_count', 0)} 笔。</p>")
+        if financial_summary.get('settle_estimated_cash_at_application'):
+            details += ("<p>申赎申请时按当日预估现金 E 交收。下一交易日清单披露实际现金 A 后，"
+                        "申购按 E−A、赎回按 A−E 进行差额交收，到账按本轮配置记录。</p>")
         if 'fee_breakdown' in financial_summary:
             details += (f"<h2>交易税费</h2><p>成交税费合计 {Decimal(financial_summary['fee']):,.2f} 元；"
                         f"其中投资者账户扣款 {Decimal(financial_summary['investor_fees']):,.2f} 元，"

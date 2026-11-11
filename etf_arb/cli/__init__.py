@@ -68,7 +68,8 @@ def main() -> int:
     if args.command == "status":
         print("Core models, PCF parsing, iFinD minute-close storage and basket pricing are available.")
         print("BacktestRunner supports configuration, quality preflight, clock callbacks and decision replay.")
-        print("159338 full-flow research simulation supports premium decisions, execution, cash substitution, account equity and reports.")
+        from etf_arb.data.snapshot import FULL_FLOW_ETFS
+        print(f"Full-flow research simulation (one ETF per run): {', '.join(FULL_FLOW_ETFS)}.")
     elif args.command == "scan-minute-close":
         repository = ParquetMinuteCloseRepository(
             args.root,

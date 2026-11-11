@@ -3,13 +3,13 @@
 from datetime import timedelta
 import json
 
-from etf_arb.data.snapshot import component_symbol
+from etf_arb.data.snapshot import FULL_FLOW_ETFS, component_symbol
 from etf_arb.costs import AssetType, TradeFeeModel
 from etf_arb.decision.basket import check_creation_basket
 from etf_arb.domain import Quote, Side, TradeDecision
 from etf_arb.execution.plan import application_allowed, build_plan
 from etf_arb.pricing.errors import PricingDataError
-from etf_arb.pricing.iopv import calculate_iopv_159338
+from etf_arb.pricing.iopv import calculate_iopv
 from etf_arb.pricing.premium_discount import calculate_premium_discount
 from etf_arb.rules import TradingTimeRule
 
@@ -25,7 +25,7 @@ class PremiumDiscountSource:
 
     def on_time(self, context):
         now = context.now
-        pcf = context.pcfs["159338"]
+        pcf, = context.pcfs.values()
         row = dict(ts=now, etf_close=None, iopv=None, premium=None, side="", reason="",
                    blocked_components="", component_reasons="", cash_substituted_components="",
                    estimated_fee=None, estimated_net_edge=None)
@@ -36,16 +36,18 @@ class PremiumDiscountSource:
         if not self.trading_times.allows(now.time()):
             row["reason"] = "outside_trading_sessions"
             return ()
-        etf = self.prices.get("159338.SZ", now)
+        etf = self.prices.get(FULL_FLOW_ETFS[pcf.etf_code], now)
         quotes = {}
         for component in pcf.components:
-            if component.is_cash_placeholder or component.substitution_flag in {"2", "必须", "必须现金替代"}:
+            if component.is_cash_placeholder or component.substitution_flag in {
+                "2", "必须", "必须现金替代", "深市必须", "沪市必须",
+            }:
                 continue
             bar = self.prices.get(component_symbol(component), now)
             if bar:
                 quotes[component.security_code] = Quote(component.security_code, bar.time, last=bar.close)
         try:
-            valuation = calculate_iopv_159338(
+            valuation = calculate_iopv(
                 pcf, quotes, now, session_validator=lambda at: self.trading_times.allows(at.time()),
             )
         except PricingDataError as error:

@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import re
 import xml.etree.ElementTree as ET
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
@@ -259,6 +259,18 @@ def _pcf_from_fields(
     if source_format == "json" and pre_cash_value is None:
         pre_cash_value = fields.get("CashComponent")
     pre_cash = _decimal(pre_cash_value, field="PreCashComponent") if exchange == "SH" else None
+    switch = _text(
+        fields.get("CreationRedemptionSwitch", fields.get("CreationRedemption")),
+        field="CreationRedemptionSwitch",
+    )
+    if exchange == "SZ":
+        creation_enabled = _yn(fields.get("Creation"), field="Creation")
+        redemption_enabled = _yn(fields.get("Redemption"), field="Redemption")
+    else:
+        creation_enabled, redemption_enabled = {
+            "1": (True, True),
+            "申购和赎回皆允许": (True, True),
+        }.get(switch, (None, None))
     components = tuple(rows)
     # The cash placeholder is a reporting row, not a security. Keep it in the
     # normalized PCF for auditability; pricing code can filter it explicitly.
@@ -295,12 +307,9 @@ def _pcf_from_fields(
             fields.get("Publish" if exchange == "SZ" or source_format == "json" else "PublishIOPVFlag"),
             field="Publish",
         ),
-        creation_enabled=_yn(fields.get("Creation"), field="Creation") if exchange == "SZ" else None,
-        redemption_enabled=_yn(fields.get("Redemption"), field="Redemption") if exchange == "SZ" else None,
-        creation_redemption_switch=_text(
-            fields.get("CreationRedemptionSwitch", fields.get("CreationRedemption")),
-            field="CreationRedemptionSwitch",
-        ),
+        creation_enabled=creation_enabled,
+        redemption_enabled=redemption_enabled,
+        creation_redemption_switch=switch,
         creation_redemption_mechanism=_text(fields.get("CreationRedemptionMechanism"), field="CreationRedemptionMechanism"),
         creation_limit=_decimal(fields.get("CreationLimit"), field="CreationLimit"),
         redemption_limit=_decimal(fields.get("RedemptionLimit"), field="RedemptionLimit"),
@@ -400,8 +409,19 @@ def parse_pcf_json(path: str | Path) -> PCF:
     info = payload.get("info", [])
     info_map = {str(row[2]): row[1] for row in info if isinstance(row, list) and len(row) >= 3}
     current = _json_properties(payload.get("t"))
-    previous = _json_properties(payload.get("t-1"))
+    previous_section = payload.get("t-1")
+    previous = _json_properties(previous_section)
     fields: dict[str, object] = {**previous, **current}
+    if not fields.get("PreTradingDay") and isinstance(previous_section, dict):
+        published_day = previous_section.get("date")
+        if published_day:
+            try:
+                at = datetime.fromisoformat(published_day.replace("Z", "+00:00"))
+            except (AttributeError, TypeError, ValueError) as error:
+                raise PCFParseError(f"Invalid previous trading date: {published_day!r}") from error
+            if at.tzinfo is not None:
+                at = at.astimezone(timezone(timedelta(hours=8)))
+            fields["PreTradingDay"] = at.strftime("%Y%m%d")
     # Legacy files can expose a secondary market identifier (e.g. Fundid1)
     # that differs from the six-digit ETF directory. Prefer the repository's
     # canonical directory code when available.

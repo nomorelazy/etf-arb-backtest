@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 from decimal import Decimal
 
-from etf_arb.data.snapshot import component_symbol
+from etf_arb.data.snapshot import component_symbol, is_cross_market
 from etf_arb.pricing.iopv import SubstitutionKind, _normalize_substitution_flag
 from etf_arb.rules.tradability import security_trade_block
 
@@ -19,7 +19,7 @@ class CreationBasketCheck:
 def check_creation_basket(pcf, prices, rules, now, policy):
     """Use only currently known rules/quotes, never future fill availability.
 
-    Optional SZ substitution deposits use the user's explicit research formula:
+    Optional domestic substitution deposits use the user's research formula:
     current exact close * PCF shares * (1 + PCF creation premium).
     Amounts returned here are per creation unit; build_plan scales them once.
     """
@@ -35,8 +35,8 @@ def check_creation_basket(pcf, prices, rules, now, policy):
             continue
         if kind is SubstitutionKind.MANDATORY:
             continue
-        # Non-SZ allowed rows already use the PCF aggregate cash deposit.
-        if component.market_code == "101" and kind is SubstitutionKind.ALLOWED:
+        # Cross-market securities already go through the manager.
+        if is_cross_market(pcf, symbol) and kind is SubstitutionKind.ALLOWED:
             continue
         block = security_trade_block(rules, symbol, now, "BUY", policy)
         bar = prices.get(symbol, now, exact=True)

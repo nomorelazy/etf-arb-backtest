@@ -28,21 +28,29 @@ class CashLeg:
     pricing_basis: str = ""
     payment_basis: str = "unknown"
     priced_at: datetime | None = None
+    actual_component: Decimal | None = None
 
     @property
     def outstanding(self):
         return Decimal("0") if self.paid else (self.estimate if self.final is None else self.final)
 
-    def observe_cash_component(self, pcf, opened_day, side, units, deposit, calendar, lag):
-        # CashComponent is labelled by PreTradingDay, NOT by the PCF publication date.
+    def observe_cash_component(self, pcf, opened_day, side, units, deposit, calendar, lag,
+                               *, require_next_trading_day=False):
+        # The later PCF carries the actual amount for its labelled previous day.
         if self.kind != "cash_difference" or self.final is not None:
             return
-        if pcf.pre_trading_day != opened_day or pcf.actual_cash_component is None:
+        if pcf.pre_trading_day != opened_day:
             return
-        amount = pcf.actual_cash_component * units
+        if require_next_trading_day and pcf.effective_date != trading_day_after(calendar, opened_day, 1):
+            return
+        actual = pcf.pre_cash_component if pcf.exchange == "SH" else pcf.actual_cash_component
+        if actual is None:
+            return
+        amount = actual * units
         if not amount.is_finite():
             raise ValueError("Non-finite actual cash component")
         self.final = deposit - amount if side.value == "CREATE" else deposit + amount
+        self.actual_component = amount
         self.known_on = pcf.effective_date
         self.priced_at = datetime.combine(pcf.effective_date, datetime.min.time())
         if lag is not None and self.payment_at is None:

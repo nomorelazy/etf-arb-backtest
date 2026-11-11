@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 
-from etf_arb.data.snapshot import component_symbol
+from etf_arb.data.snapshot import FULL_FLOW_ETFS, component_symbol
 from etf_arb.costs import AssetType, TradeFeeModel
 from etf_arb.decision.basket import check_creation_basket
 from etf_arb.domain import Side
@@ -41,7 +41,11 @@ class SimOrder:
     paused: bool = False
     manager_attempted_at: datetime | None = None
     next_minute_attempted_at: datetime | None = None
-    last_sh_attempted_at: datetime | None = None
+    last_cross_market_attempted_at: datetime | None = None
+
+    @property
+    def last_sh_attempted_at(self):
+        return self.last_cross_market_attempted_at if self.symbol.endswith(".SH") else None
 
     @property
     def remaining(self):
@@ -65,8 +69,10 @@ class SimTrade:
 
 
 class ArbitrageSimulator:
-    def __init__(self, prices, settings):
+    def __init__(self, prices, settings, *, etf_code="159338"):
         self.prices, self.settings = prices, settings
+        self.etf_symbol = FULL_FLOW_ETFS[etf_code]
+        self.proxy_market = "SZ" if self.etf_symbol.endswith(".SH") else "SH"
         self.fee_model = TradeFeeModel(settings.fees)
         self.account = None
         self.trades, self.orders, self.fills, self.rejections = [], [], [], []
@@ -86,7 +92,7 @@ class ArbitrageSimulator:
 
     def _fee_for(self, symbol, side, quantity, price):
         return self.fee_model.calculate(
-            asset_type=AssetType.ETF if symbol == "159338.SZ" else AssetType.STOCK,
+            asset_type=AssetType.ETF if symbol == self.etf_symbol else AssetType.STOCK,
             side=side, turnover=quantity * price)
 
     def available(self, at):
@@ -115,7 +121,7 @@ class ArbitrageSimulator:
             self.payment_dates = load_payment_dates(context.resources.config.cash_payment_dates_path)
             from datetime import timedelta
             self.equity_curve.append(EquityPoint(context.now.date() - timedelta(days=1), self.account.cash))
-        symbols = {"159338.SZ"}
+        symbols = {self.etf_symbol}
         for pcf in context.pcfs.values():
             symbols.update(component_symbol(c) for c in pcf.components if not c.is_cash_placeholder)
         for order in self.orders:
@@ -130,16 +136,17 @@ class ArbitrageSimulator:
                         context.pcfs[trade.pcf.etf_code], trade.applied_at.date(), trade.decision.side,
                         trade.decision.quantity_units, trade.cash_deposit,
                         context.resources.config.trading_days, self.settings.cash_difference_lag,
+                        require_next_trading_day=self.settings.settle_estimated_cash_at_application,
                     )
 
-    def _can_trade(self, order, context, *, application_minute=False, sh_window=False):
+    def _can_trade(self, order, context, *, application_minute=False, proxy_window=False):
         now = context.now
         if (now < order.submitted or (now == order.submitted and not application_minute)
                 or now.date() < order.not_before_day):
             return "waiting_for_later_bar_or_sell_availability"
-        if sh_window:
+        if proxy_window:
             if not self.cash_timing.allows_sh_attempt(now):
-                return "outside_sh_proxy_minutes"
+                return f"outside_{self.proxy_market.lower()}_proxy_minutes"
         elif self.trading_times.is_blocked(now.time()):
             return "blocked_trade_minute"
         elif not self.trading_times.allows(now.time()):
@@ -183,10 +190,8 @@ class ArbitrageSimulator:
         ):
             self.rejections.append(dict(ts=context.now, reason="no_exact_next_minute_for_market_split"))
             return
-        entries = plan.physical if decision.side is Side.CREATE else {"159338.SZ": plan.etf_shares}
-        needed = max(plan.estimated_cash, ZERO)
-        if decision.side is Side.CREATE:
-            needed += plan.substitution_deposit + plan.domestic_fixed
+        entries = plan.physical if decision.side is Side.CREATE else {self.etf_symbol: plan.etf_shares}
+        needed = max(self._application_cash_due(plan, decision.side), ZERO)
         for symbol, quantity in entries.items():
             bar = self.prices.get(symbol, context.now, exact=True)
             if bar is None:
@@ -223,7 +228,7 @@ class ArbitrageSimulator:
             self._fill_full_basket(trade, context)
         # Application remains on a later bar, including all-cash creation.
 
-    def _fill(self, order, trade, context, *, next_minute=False, sh_window=False, at_signal=False):
+    def _fill(self, order, trade, context, *, next_minute=False, proxy_window=False, at_signal=False):
         if not order.remaining or order.paused:
             return
         if at_signal and (not self.settings.entry_at_signal_time or order.purpose != "ENTRY"
@@ -233,7 +238,7 @@ class ArbitrageSimulator:
             valid_redemption_exit = (trade.decision.side is Side.REDEEM and order.purpose == "EXIT"
                                      and order.symbol in trade.plan.physical)
             valid_creation_exit = (self.settings.entry_at_signal_time and trade.decision.side is Side.CREATE
-                                   and order.purpose == "EXIT" and order.symbol == "159338.SZ"
+                                   and order.purpose == "EXIT" and order.symbol == self.etf_symbol
                                    and order.side == "SELL")
             if (not self.settings.market_split_execution or not (valid_redemption_exit or valid_creation_exit)
                     or trade.applied_at != context.now
@@ -241,16 +246,16 @@ class ArbitrageSimulator:
                 raise ValueError("Next-minute fills require a confirmed market-split t+1 application")
         if order.purpose == "MANAGER":
             sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
-            if self.settings.market_split_execution and order.symbol.endswith(".SH"):
-                if not sh_window:
+            if self.settings.market_split_execution and self._cross_market_proxy(order.symbol):
+                if not proxy_window:
                     return
                 if (trade.applied_at is None or context.now < trade.applied_at
                         or (sub.pricing_deadline is not None and
                             context.now > datetime.combine(sub.pricing_deadline, time(15)))):
-                    raise ValueError("SH proxy attempt is outside application-to-deadline window")
-                if order.last_sh_attempted_at == context.now:
+                    raise ValueError("Cross-market proxy attempt is outside application-to-deadline window")
+                if order.last_cross_market_attempted_at == context.now:
                     return
-                order.last_sh_attempted_at = context.now
+                order.last_cross_market_attempted_at = context.now
                 if context.now == trade.applied_at:
                     order.next_minute_attempted_at = context.now
             else:
@@ -261,21 +266,19 @@ class ArbitrageSimulator:
                     return
                 # Scheduled callback and regular clock may share a timestamp.
                 order.manager_attempted_at = context.now
-        block = self._can_trade(order, context, application_minute=next_minute or sh_window or at_signal,
-                                sh_window=sh_window)
+        block = self._can_trade(order, context, application_minute=next_minute or proxy_window or at_signal,
+                                proxy_window=proxy_window)
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
             return
         quantity = order.remaining
         cap = self.settings.max_shares_per_minute
-        if cap is not None and not (next_minute or sh_window) and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
+        if cap is not None and not (next_minute or proxy_window) and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
             quantity = min(quantity, cap)
         if order.purpose != "MANAGER":
             if order.side == "BUY":
-                floor = max(trade.plan.estimated_cash, ZERO)
-                if trade.decision.side is Side.CREATE:
-                    floor += trade.plan.substitution_deposit + trade.plan.domestic_fixed
+                floor = max(self._application_cash_due(trade.plan, trade.decision.side), ZERO)
                 available = max(ZERO, self.account.cash - floor)
                 if self.settings.assume_full_basket_fill:
                     required = quantity * bar.close + self._fee_for(order.symbol, "BUY", quantity, bar.close).total
@@ -308,7 +311,7 @@ class ArbitrageSimulator:
                                symbol=order.symbol, side=order.side, quantity=quantity, price=bar.close,
                                purpose=order.purpose, fee=fees.total, **asdict(fees), slippage=ZERO,
                                basis=(("manager_next_minute_close_proxy" if context.now == trade.applied_at
-                                       else "manager_first_tradable_close_proxy") if sh_window
+                                       else "manager_first_tradable_close_proxy") if proxy_window
                                       else "manager_scheduled_close_proxy")
                                      if order.purpose == "MANAGER" else
                                      "signal_minute_close" if at_signal else "next_minute_close"))
@@ -341,9 +344,7 @@ class ArbitrageSimulator:
             trade.decision.side, trade.decision.quantity_units, application_at.time()
         ):
             raise ValueError(f"Full-basket assumption has no valid application: {trade.trade_id}")
-        required = max(trade.plan.estimated_cash, ZERO)
-        if trade.decision.side is Side.CREATE:
-            required += trade.plan.substitution_deposit + trade.plan.domestic_fixed
+        required = max(self._application_cash_due(trade.plan, trade.decision.side), ZERO)
         entries = [order for order in self._orders(trade, "ENTRY") if order.remaining]
         for order in entries:
             block = self._can_trade(order, context, application_minute=at_signal)
@@ -360,6 +361,15 @@ class ArbitrageSimulator:
             self._fill(order, trade, context, at_signal=at_signal)
         self._apply(trade, context)
 
+    def _estimated_cash_due(self, plan, side):
+        if self.settings.settle_estimated_cash_at_application:
+            return plan.estimated_cash if side is Side.CREATE else -plan.estimated_cash
+        return max(plan.estimated_cash, ZERO)
+
+    def _application_cash_due(self, plan, side):
+        estimated = self._estimated_cash_due(plan, side)
+        return estimated + plan.substitution_deposit + plan.domestic_fixed if side is Side.CREATE else estimated
+
     def _apply(self, trade, context):
         plan, side, now = trade.plan, trade.decision.side, context.now
         if not self.trading_times.allows(now.time()):
@@ -372,8 +382,8 @@ class ArbitrageSimulator:
         ):
             self._hold(trade, context, "application_cutoff_or_disabled")
             return
-        deposit = max(plan.estimated_cash, ZERO)
-        due_cash = deposit + (plan.substitution_deposit + plan.domestic_fixed if side is Side.CREATE else ZERO)
+        deposit = self._estimated_cash_due(plan, side)
+        due_cash = self._application_cash_due(plan, side)
         if self.account.cash < due_cash:
             self._hold(trade, context, "insufficient_application_cash")
             return
@@ -384,12 +394,12 @@ class ArbitrageSimulator:
         if side is Side.CREATE:
             for symbol, quantity in plan.physical.items():
                 self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol=symbol, quantity=-quantity)
-            self.account.post(now, trade.trade_id, Event.SECURITIES_AVAILABLE, symbol="159338.SZ", quantity=plan.etf_shares)
-            self._order(trade, "159338.SZ", "SELL", plan.etf_shares, now, "EXIT")
+            self.account.post(now, trade.trade_id, Event.SECURITIES_AVAILABLE, symbol=self.etf_symbol, quantity=plan.etf_shares)
+            self._order(trade, self.etf_symbol, "SELL", plan.etf_shares, now, "EXIT")
             cash_estimate = deposit - plan.estimated_cash
             sub_estimate = plan.substitution_deposit - self._manager_value(trade, now)
         else:
-            self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol="159338.SZ", quantity=-plan.etf_shares)
+            self.account.post(now, trade.trade_id, Event.APPLICATION_CONFIRMED, symbol=self.etf_symbol, quantity=-plan.etf_shares)
             for symbol, quantity in plan.physical.items():
                 self.account.post(now, trade.trade_id, Event.SECURITIES_AVAILABLE, symbol=symbol, quantity=quantity)
                 self._order(trade, symbol, "SELL", quantity, now, "EXIT")
@@ -401,7 +411,7 @@ class ArbitrageSimulator:
             now.date(), context.resources.config.trading_days,
             context.resources.config.settlement_business_days)
         has_scheduled_proxy = (not self.settings.market_split_execution or
-                              any(not symbol.endswith(".SH") for symbol in plan.manager))
+                              any(not self._cross_market_proxy(symbol) for symbol in plan.manager))
         sub.attempt_scheduled_at = self.cash_timing.attempt_at(sub.pricing_deadline) if has_scheduled_proxy else None
         if sub.attempt_scheduled_at is not None and sub.attempt_scheduled_at >= now:
             context.schedule(sub.attempt_scheduled_at,
@@ -427,7 +437,7 @@ class ArbitrageSimulator:
         for symbol, quantity in plan.manager.items():
             self._order(trade, symbol, "BUY" if side is Side.CREATE else "SELL", quantity, now, "MANAGER")
         if self.settings.market_split_execution:
-            self._attempt_sh_substitution(trade, context)
+            self._attempt_cross_market_substitution(trade, context)
             if side is Side.REDEEM or self.settings.entry_at_signal_time:
                 for order in self._orders(trade, "EXIT"):
                     self._fill(order, trade, context, next_minute=True)
@@ -437,14 +447,16 @@ class ArbitrageSimulator:
                         trade.delayed_redemption[order.symbol] = order.last_block
                 if not trade.delayed_redemption:
                     trade.redemption_prices_locked_at = now
-        # SZ replacement purchases always retain their scheduled T+2 attempt,
-        # even if the stock becomes tradable earlier. SH retries every minute.
+        # Optional domestic replacements retain the scheduled T+2 attempt.
+
+    def _cross_market_proxy(self, symbol):
+        return symbol.endswith(f".{self.proxy_market}")
 
     def _attempt_substitution(self, trade, context):
         for order in self._orders(trade, "MANAGER"):
             if not order.remaining or order.paused:
                 continue
-            if self.settings.market_split_execution and order.symbol.endswith(".SH"):
+            if self.settings.market_split_execution and self._cross_market_proxy(order.symbol):
                 continue
             if order.manager_attempted_at is not None:
                 continue
@@ -459,31 +471,32 @@ class ArbitrageSimulator:
                 timing="scheduled_substitution"))
         self._settle(trade, context)
 
-    def _attempt_sh_substitution(self, trade, context, *, schedule_next=True):
+    def _attempt_cross_market_substitution(self, trade, context, *, schedule_next=True):
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
         if sub.final is not None or trade.state != "APPLIED":
             return
         for order in self._orders(trade, "MANAGER"):
-            if (not order.symbol.endswith(".SH") or not order.remaining or order.paused
-                    or order.last_sh_attempted_at == context.now):
+            if (not self._cross_market_proxy(order.symbol) or not order.remaining or order.paused
+                    or order.last_cross_market_attempted_at == context.now):
                 continue
             requested, before = order.remaining, order.filled
-            self._fill(order, trade, context, sh_window=True)
+            self._fill(order, trade, context, proxy_window=True)
             filled = order.filled - before
             self.substitution_attempts.append(dict(trade_id=trade.trade_id, order_id=order.order_id,
                 symbol=order.symbol, ts=context.now, side=order.side, requested_quantity=requested,
                 filled_quantity=filled, unfilled_quantity=order.remaining,
                 result="FILLED" if filled == requested else "NO_FILL", reason=order.last_block,
-                timing="sh_next_minute" if context.now == trade.applied_at else "sh_first_tradable_window"))
+                timing=(f"{self.proxy_market.lower()}_next_minute" if context.now == trade.applied_at
+                        else f"{self.proxy_market.lower()}_first_tradable_window")))
         self._settle(trade, context)
-        pending = any(o.symbol.endswith(".SH") and o.remaining and not o.paused
+        pending = any(self._cross_market_proxy(o.symbol) and o.remaining and not o.paused
                       for o in self._orders(trade, "MANAGER"))
         if schedule_next and pending:
             next_at = self.cash_timing.next_sh_attempt(
                 context.now, context.resources.config.trading_days, sub.pricing_deadline)
             if next_at is not None:
-                context.schedule(next_at, lambda ctx, t=trade: self._attempt_sh_substitution(t, ctx),
-                                 f"cash.sh_first_tradable.{trade.trade_id}")
+                context.schedule(next_at, lambda ctx, t=trade: self._attempt_cross_market_substitution(t, ctx),
+                                 f"cash.{self.proxy_market.lower()}_first_tradable.{trade.trade_id}")
 
     def _manager_value(self, trade, now):
         result = trade.plan.manager_fixed
@@ -554,7 +567,7 @@ class ArbitrageSimulator:
         if self.settings.market_split_execution and context.now.time() == time(15):
             # The deadline callback may precede the queued 15:00 retry. Give
             # that inclusive last minute a chance before valuing unfilled stock.
-            self._attempt_sh_substitution(trade, context, schedule_next=False)
+            self._attempt_cross_market_substitution(trade, context, schedule_next=False)
         outstanding = [order for order in self._orders(trade, "MANAGER") if order.remaining]
         prices = {}
         for order in outstanding:
@@ -597,7 +610,7 @@ class ArbitrageSimulator:
             return
         context.resources.portfolio.settle_trade(trade_id=trade.trade_id, settled_at=context.now,
             pnl=self.account.trade_cash.get(trade.trade_id, ZERO),
-            amount=sum((o.value for o in self._orders(trade) if o.symbol == "159338.SZ" and o.purpose != "MANAGER"), ZERO))
+            amount=sum((o.value for o in self._orders(trade) if o.symbol == self.etf_symbol and o.purpose != "MANAGER"), ZERO))
         trade.state = "CLOSED"
 
     def on_time(self, context):
