@@ -10,6 +10,7 @@ from pathlib import Path
 
 from etf_arb import __version__
 from etf_arb.data import ParquetMinuteCloseRepository, check_missing
+from etf_arb.report.models import DEFAULT_ANNUAL_RISK_FREE_RATE
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--trades", help="optional CSV with trade_id,net_pnl columns")
     report_parser.add_argument("--starting-cash", required=True, type=Decimal)
     report_parser.add_argument("--output", default="reports/latest", help="report output directory")
-    report_parser.add_argument("--risk-free-rate", type=float, default=0.0, help="annual risk-free rate, e.g. 0.02")
+    report_parser.add_argument("--risk-free-rate", type=float, default=DEFAULT_ANNUAL_RISK_FREE_RATE,
+                               help="annual risk-free rate as a ratio (default: 0.015)")
     report_parser.add_argument("--periods-per-year", type=int, default=252)
     attribution_parser = subparsers.add_parser('report-attribution',
         help='rebuild a detailed report from an existing completed run without executing trades')

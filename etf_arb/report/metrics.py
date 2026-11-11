@@ -7,7 +7,7 @@ from math import isfinite, sqrt
 from statistics import stdev
 from typing import Iterable
 
-from etf_arb.report.models import BacktestSummary, ClosedTrade, EquityPoint
+from etf_arb.report.models import DEFAULT_ANNUAL_RISK_FREE_RATE, BacktestSummary, ClosedTrade, EquityPoint
 
 
 def _annualized_return(
@@ -31,7 +31,7 @@ def calculate_summary(
     filled_orders: int = 0,
     rejected_orders: int = 0,
     failed_applications: int = 0,
-    annual_risk_free_rate: float = 0.0,
+    annual_risk_free_rate: float = DEFAULT_ANNUAL_RISK_FREE_RATE,
     periods_per_year: int = 252,
 ) -> BacktestSummary:
     """计算绩效。
@@ -124,4 +124,5 @@ def calculate_summary(
         filled_orders=filled_orders,
         rejected_orders=rejected_orders,
         failed_applications=failed_applications,
+        annual_risk_free_rate=annual_risk_free_rate,
     )

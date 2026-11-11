@@ -108,3 +108,7 @@
 试跑开启带符号预估现金交收，申请时按 E 付款或收款，下一交易日且 `PreTradingDay` 对应申请日时读取实际现金 A。深市读 `CashComponent`，沪市读 `PreCashComponent`，旧沪市 JSON 的前一日标记按北京时间解析。差额为申购 E−A、赎回 A−E。试跑设置披露日模拟差额到账，实际到账时间可由资金记录提供。报告继续保留未交收状态、发起日归属和六列账本。
 
 沪市跨市场路由参考 [512760 招募说明书](https://www.sse.com.cn/disclosure/fund/announcement/c/new/2025-09-30/512760_20250930_6HUZ.pdf)、[512880 招募说明书](https://www.sse.com.cn/disclosure/fund/announcement/c/new/2025-09-30/512880_20250930_SA4Z.pdf) 和 [515880 招募说明书](https://www.sse.com.cn/disclosure/fund/announcement/c/new/2026-02-04/515880_20260204_GARQ.pdf)。
+
+## 年化无风险利率
+
+用户指定年化无风险利率为 1.5%。完整回测、逐笔报告重建和独立报告默认使用该值，按每年 252 个交易日复利换算为日利率后计算超额收益及夏普比率。HTML、指标 CSV 和图表记录本轮使用的利率。独立报告保留 `--risk-free-rate` 覆盖参数。
