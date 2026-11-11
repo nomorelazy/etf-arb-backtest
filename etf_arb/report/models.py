@@ -7,6 +7,9 @@ from datetime import date
 from decimal import Decimal
 
 
+DEFAULT_ANNUAL_RISK_FREE_RATE = 0.015
+
+
 @dataclass(frozen=True)
 class EquityPoint:
     """一个估值点的账户总权益（现金 + 按规则标记的持仓市值）。"""
@@ -41,3 +44,4 @@ class BacktestSummary:
     filled_orders: int = 0
     rejected_orders: int = 0
     failed_applications: int = 0
+    annual_risk_free_rate: float = DEFAULT_ANNUAL_RISK_FREE_RATE

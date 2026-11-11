@@ -1,6 +1,8 @@
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from math import sqrt
+from statistics import stdev
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -40,7 +42,11 @@ class ReportTests(unittest.TestCase):
         self.assertAlmostEqual(float(summary.win_rate), 0.5)
         self.assertAlmostEqual(float(summary.profit_loss_ratio), 2.0)
         self.assertEqual(summary.trade_count, 3)
-        self.assertIsNotNone(summary.sharpe_ratio)
+        daily_returns = (0.1, -0.2, 0.25)
+        daily_risk_free_rate = 1.015 ** (1 / 3) - 1
+        expected_sharpe = (0.05 - daily_risk_free_rate) / stdev(daily_returns) * sqrt(3)
+        self.assertEqual(summary.annual_risk_free_rate, 0.015)
+        self.assertAlmostEqual(summary.sharpe_ratio, expected_sharpe)
         self.assertIsNotNone(summary.annualized_volatility)
 
     def test_starting_equity_must_be_explicit_first_point(self) -> None:
@@ -65,6 +71,8 @@ class ReportTests(unittest.TestCase):
                 self.assertTrue((output / name).is_file(), name)
             html = (output / "report.html").read_text(encoding="utf-8")
             self.assertIn("收益回撤比", html)
+            self.assertIn("<th>年化无风险利率</th><td>1.50%</td>", html)
+            self.assertIn("annual_risk_free_rate,1.50000000,%", (output / "metrics.csv").read_text(encoding="utf-8-sig"))
             self.assertEqual(summary.trade_count, 3)
 
     def test_cli_builds_report_from_csv_inputs(self) -> None:
@@ -92,6 +100,13 @@ class ReportTests(unittest.TestCase):
                 self.assertEqual(main(), 0)
             self.assertTrue((output_dir / "report.html").is_file())
             self.assertTrue((output_dir / "pnl_report.png").is_file())
+            self.assertIn("annual_risk_free_rate,1.50000000,%",
+                          (output_dir / "metrics.csv").read_text(encoding="utf-8-sig"))
+            override_dir = root / "override"
+            with patch("sys.argv", [*args[:-1], str(override_dir), "--risk-free-rate", "0"]), redirect_stdout(StringIO()):
+                self.assertEqual(main(), 0)
+            self.assertIn("annual_risk_free_rate,0.00000000,%",
+                          (override_dir / "metrics.csv").read_text(encoding="utf-8-sig"))
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ from html import escape
 from typing import Sequence
 
 from etf_arb.report.metrics import calculate_summary
-from etf_arb.report.models import BacktestSummary, ClosedTrade, EquityPoint
+from etf_arb.report.models import DEFAULT_ANNUAL_RISK_FREE_RATE, BacktestSummary, ClosedTrade, EquityPoint
 
 
 def _format_metric(value: object) -> str:
@@ -29,6 +29,7 @@ _PERCENT_METRICS = {
     "max_drawdown",
     "win_rate",
     "annualized_volatility",
+    "annual_risk_free_rate",
 }
 _CURRENCY_METRICS = {"starting_cash", "ending_equity", "total_costs", "peak_cash_usage"}
 _COUNT_METRICS = {"trade_count", "filled_orders", "rejected_orders", "failed_applications"}
@@ -88,7 +89,7 @@ def save_report(
     *,
     starting_cash: Decimal | str | int,
     total_costs: Decimal | str | int = Decimal("0"),
-    annual_risk_free_rate: float = 0.0,
+    annual_risk_free_rate: float = DEFAULT_ANNUAL_RISK_FREE_RATE,
     periods_per_year: int = 252,
     peak_cash_usage: Decimal = Decimal("0"),
     filled_orders: int = 0,
@@ -157,7 +158,7 @@ def save_report(
     metric_lines = [
         f"Annualized: {_format_percent(summary.annualized_return)}",
         f"Max DD: {_format_percent(summary.max_drawdown, absolute=True)}",
-        f"Sharpe: {_format_metric(summary.sharpe_ratio)}",
+        f"Sharpe (Rf {summary.annual_risk_free_rate:.2%}): {_format_metric(summary.sharpe_ratio)}",
         f"Win rate: {_format_percent(summary.win_rate)}",
         f"P/L ratio: {_format_metric(summary.profit_loss_ratio)}",
         f"Trades: {summary.trade_count}",
@@ -185,6 +186,7 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
         "annualized_return": "年化收益率",
         "max_drawdown": "最大回撤",
         "sharpe_ratio": "夏普比率",
+        "annual_risk_free_rate": "年化无风险利率",
         "win_rate": "胜率（平局不计入分母）",
         "profit_loss_ratio": "盈亏比（平均盈利 / 平均亏损）",
         "trade_count": "已平仓交易次数",
@@ -196,6 +198,7 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
         "annualized_return": _format_percent(summary.annualized_return),
         "max_drawdown": _format_percent(summary.max_drawdown),
         "sharpe_ratio": _format_metric(summary.sharpe_ratio),
+        "annual_risk_free_rate": _format_percent(summary.annual_risk_free_rate),
         "win_rate": _format_percent(summary.win_rate),
         "profit_loss_ratio": _format_metric(summary.profit_loss_ratio),
         "trade_count": str(summary.trade_count),
