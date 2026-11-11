@@ -56,7 +56,7 @@ def build_parser() -> argparse.ArgumentParser:
     report_parser.add_argument("--starting-cash", required=True, type=Decimal)
     report_parser.add_argument("--output", default="reports/latest", help="report output directory")
     report_parser.add_argument("--risk-free-rate", type=float, default=DEFAULT_ANNUAL_RISK_FREE_RATE,
-                               help="annual risk-free rate as a ratio (default: 0.015)")
+                               help="annual risk-free rate as a ratio (default: %(default)s)")
     report_parser.add_argument("--periods-per-year", type=int, default=252)
     attribution_parser = subparsers.add_parser('report-attribution',
         help='rebuild a detailed report from an existing completed run without executing trades')
