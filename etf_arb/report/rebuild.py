@@ -44,7 +44,7 @@ def restore_signal_references(config, trades, decisions, substitutions):
     plans, by_month = {}, defaultdict(lambda: dict(times=set(), symbols=set()))
     for trade in missing:
         at, units = timestamp(trade['opened_at']), int(trade['quantity_units'])
-        pcf = pcfs.get('159338', at.date())
+        pcf = pcfs.get(config.get('etf_codes', ['159338'])[0], at.date())
         selected = {symbol: amount / units for symbol, amount in substitutes[trade['trade_id']].items()}
         plan = build_plan(pcf, Side(trade['side']), units,
                           creation_cash_substitutions=selected if selected else None)
@@ -108,7 +108,8 @@ def rebuild_run_report(run_dir, output_dir):
                 filled_orders=int(metrics.get('filled_orders', '0')),
                 rejected_orders=int(metrics.get('rejected_orders', '0')),
                 failed_applications=int(metrics.get('failed_applications', '0')),
-                title='159338 Research simulation (configured fees, slippage=0; proxy cash settlement)')
+                title=f"{config.get('etf_codes', ['159338'])[0]} Research simulation "
+                      "(configured fees, slippage=0; proxy cash settlement)")
     save_ledger_report(output_dir / 'ledger.html', trades, read_rows(run_dir / 'cashflows.csv'),
         fills, settlements, pricing, read_rows(run_dir / 'substitution_attempts.csv'), substitutions,
         fees, attribution_rows=attribution)

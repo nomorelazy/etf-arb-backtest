@@ -1,4 +1,4 @@
-"""159338 盘中 IOPV 估值。
+"""沪深股票 ETF 盘中 IOPV 估值。
 
 本模块只负责 T 日盘中 IOPV，不处理 T+1/T+2 现金替代结算。
 
@@ -38,6 +38,7 @@ from decimal import Decimal
 from enum import Enum
 from typing import Callable, Mapping
 
+from etf_arb.data.snapshot import FULL_FLOW_ETFS
 from etf_arb.domain import PCF, PCFComponent, Quote
 from etf_arb.pricing.errors import PricingDataError
 from etf_arb.rules import is_continuous_auction_time
@@ -59,7 +60,7 @@ class SubstitutionKind(str, Enum):
 
 @dataclass(frozen=True)
 class IOPVValuation:
-    """159338 单一时刻的 IOPV 估值结果。"""
+    """ETF 单一时刻的 IOPV 估值结果。"""
 
     etf_code: str
     ts: datetime
@@ -138,10 +139,10 @@ def _normalize_substitution_flag(
     if value in {"0", "禁止", "禁止现金替代"}:
         return SubstitutionKind.FORBIDDEN
 
-    if value in {"1", "允许", "允许现金替代"}:
+    if value in {"1", "允许", "允许现金替代", "退补", "深市退补", "退补现金替代"}:
         return SubstitutionKind.ALLOWED
 
-    if value in {"2", "必须", "必须现金替代"}:
+    if value in {"2", "必须", "必须现金替代", "深市必须", "沪市必须"}:
         return SubstitutionKind.MANDATORY
 
     if value.startswith("0-"):
@@ -203,28 +204,28 @@ def _split_lot_quantity(
     return lot_quantity, fractional_quantity
 
 
-def _mandatory_cash_amount(
-    component: PCFComponent,
-) -> Decimal:
+def fixed_substitution_amount(component: PCFComponent, *, redemption: bool = False) -> Decimal:
     """读取 SubstituteFlag=2 的固定现金替代金额。
 
     关键：不读取 ComponentShare。
     """
 
-    amount = component.creation_cash_substitute
+    amount = component.redemption_cash_substitute if redemption else component.creation_cash_substitute
+    if amount is None:
+        amount = component.substitution_cash_amount
 
     if amount is None:
         raise PricingDataError(
             "Mandatory cash-substitution component "
             f"{component.security_code} is missing "
-            "CreationCashSubstitute."
+            "its fixed substitution amount."
         )
 
     amount = Decimal(str(amount))
 
     if not amount.is_finite() or amount < 0:
         raise PricingDataError(
-            "Invalid CreationCashSubstitute for "
+            "Invalid fixed substitution amount for "
             f"{component.security_code}: {amount}"
         )
 
@@ -277,14 +278,14 @@ def _latest_price(
     return price
 
 
-def calculate_iopv_159338(
+def calculate_iopv(
     pcf: PCF,
     quotes: Mapping[str, Quote],
     at: datetime,
     *,
     session_validator: Callable[[datetime], bool] = is_continuous_auction_time,
 ) -> IOPVValuation:
-    """计算 159338 T 日指定时刻的盘中 IOPV。
+    """计算支持的股票 ETF 在 T 日指定时刻的盘中 IOPV。
 
     只使用：
         - T 日 PCF；
@@ -298,11 +299,8 @@ def calculate_iopv_159338(
     # 1. ETF 校验
     # ============================================================
 
-    if pcf.etf_code != "159338":
-        raise ValueError(
-            "This IOPV model is currently dedicated to 159338, "
-            f"got {pcf.etf_code!r}"
-        )
+    if pcf.etf_code not in FULL_FLOW_ETFS:
+        raise ValueError(f"Unsupported full-flow ETF: {pcf.etf_code!r}")
 
     # ============================================================
     # 2. 时间必须是北京时间 naive datetime
@@ -347,7 +345,7 @@ def calculate_iopv_159338(
 
     if pcf.estimated_cash_component is None:
         raise PricingDataError(
-            "159338 PCF is missing estimated cash component."
+            "PCF is missing estimated cash component."
         )
 
     estimated_cash = Decimal(
@@ -434,7 +432,7 @@ def calculate_iopv_159338(
         if kind is SubstitutionKind.MANDATORY:
             mandatory_component_count += 1
 
-            mandatory_cash += _mandatory_cash_amount(
+            mandatory_cash += fixed_substitution_amount(
                 component
             )
 
@@ -556,10 +554,14 @@ def calculate_iopv_159338(
     )
 
 
+calculate_iopv_159338 = calculate_iopv
+
+
 __all__ = [
     "A_SHARE_LOT_SIZE",
     "IOPV_STALE_AFTER",
     "IOPVValuation",
     "SubstitutionKind",
     "calculate_iopv_159338",
+    "calculate_iopv",
 ]

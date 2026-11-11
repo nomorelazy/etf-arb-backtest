@@ -10,11 +10,32 @@ import pyarrow.dataset as ds
 from etf_arb.data.minute_close import MinuteCloseBar, MinuteCloseConflictError, MinuteCloseDataError
 
 
+FULL_FLOW_ETFS = {
+    "159338": "159338.SZ",
+    "159516": "159516.SZ",
+    "512760": "512760.SH",
+    "512880": "512880.SH",
+    "515880": "515880.SH",
+}
+
+
 def component_symbol(component):
-    suffix = {"101": "SH", "102": "SZ"}.get(component.market_code)
+    suffix = {
+        "101": "SH", "上交所": "SH", "上海证券交易所": "SH",
+        "102": "SZ", "深交所": "SZ", "深圳证券交易所": "SZ",
+    }.get(component.market_code)
+    if component.market_code is None:
+        if component.security_code.startswith(("60", "68")):
+            suffix = "SH"
+        elif component.security_code.startswith(("00", "30")):
+            suffix = "SZ"
     if suffix is None:
         raise ValueError(f"Missing/unsupported PCF market: {component.security_code}/{component.market_code}")
     return f"{component.security_code}.{suffix}"
+
+
+def is_cross_market(pcf, symbol):
+    return symbol.rsplit(".", 1)[-1] != FULL_FLOW_ETFS[pcf.etf_code].rsplit(".", 1)[-1]
 
 
 class DailyCloseCache:

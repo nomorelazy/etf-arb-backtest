@@ -265,7 +265,7 @@ class FullFlowTests(unittest.TestCase):
         path.write_text(json.dumps(self.config.to_dict()), encoding="utf-8")
         self.assertEqual(RunnerConfig.from_json(path), self.config)
         with self.assertRaises(ValueError):
-            replace(self.config, etf_codes=("512880",))
+            replace(self.config, etf_codes=("510300",))
 
 
 if __name__ == "__main__":

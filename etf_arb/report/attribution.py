@@ -53,7 +53,8 @@ def signal_reference(plan, pcf, units, price_at):
         return None if any(x is None for x in values) else sum(values, ZERO)
     mandatory = [c for c in pcf.components if not c.is_cash_placeholder
                  and _normalize_substitution_flag(c.substitution_flag) is SubstitutionKind.MANDATORY]
-    fixed = [c.creation_cash_substitute for c in mandatory]
+    fixed = [c.creation_cash_substitute if c.creation_cash_substitute is not None
+             else c.substitution_cash_amount for c in mandatory]
     return dict(signal_physical_value=value(plan.physical), signal_manager_value=value(plan.manager),
                 signal_fixed_cash=None if any(x is None for x in fixed) else sum(fixed, ZERO) * units,
                 signal_physical_quantity=sum(plan.physical.values()))
@@ -88,8 +89,9 @@ def build_trade_attribution(trades, signals, fills, settlements, fees, pricing_r
         edge = decimal(trade.get('signal_gross_edge'))
         if edge is None and etf_price is not None and iopv is not None:
             edge = abs(etf_price - iopv) * shares
-        etf_fills = [f for f in fill_by_id[tid] if f['symbol'] == '159338.SZ' and f['purpose'] != 'MANAGER']
-        physical_fills = [f for f in fill_by_id[tid] if f['symbol'] != '159338.SZ' and f['purpose'] != 'MANAGER']
+        etf_symbol = trade.get('etf_symbol') or '159338.SZ'
+        etf_fills = [f for f in fill_by_id[tid] if f['symbol'] == etf_symbol and f['purpose'] != 'MANAGER']
+        physical_fills = [f for f in fill_by_id[tid] if f['symbol'] != etf_symbol and f['purpose'] != 'MANAGER']
         etf_value = sum((decimal(f['price']) * int(f['quantity']) for f in etf_fills), ZERO)
         physical_value = sum((decimal(f['price']) * int(f['quantity']) for f in physical_fills), ZERO)
         physical_reference = decimal(trade.get('signal_physical_value'))

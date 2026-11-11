@@ -12,6 +12,7 @@ from etf_arb.data.missing import ifind_minute_grid
 from etf_arb.costs import FeeRates
 from etf_arb.domain import Side, TradeDecision
 from etf_arb.engine.backtest import BacktestConfig
+from etf_arb.data.snapshot import FULL_FLOW_ETFS
 from etf_arb.rules import ETFRule, InMemoryRuleRepository, SecurityTradingRule
 from etf_arb.simulation_config import SimulationConfig
 
@@ -82,8 +83,10 @@ class RunnerConfig:
         if self.simulation is not None:
             if not isinstance(self.simulation, SimulationConfig) or self.mode != "execute":
                 raise RunnerConfigError("simulation requires SimulationConfig and mode=execute")
-            if self.etf_codes != ("159338",):
-                raise RunnerConfigError("The built-in full-flow simulator currently supports only 159338")
+            if len(self.etf_codes) != 1 or self.etf_codes[0] not in FULL_FLOW_ETFS:
+                raise RunnerConfigError(
+                    f"Full-flow execution requires one ETF per run from {', '.join(FULL_FLOW_ETFS)}"
+                )
             if self.decisions_path is not None:
                 raise RunnerConfigError("Built-in simulation computes decisions; omit decisions_path")
         if type(self.quality_check) is not bool:
