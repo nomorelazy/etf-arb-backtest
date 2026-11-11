@@ -7,7 +7,7 @@ from datetime import date
 from decimal import Decimal
 
 
-DEFAULT_ANNUAL_RISK_FREE_RATE = 0.015
+DEFAULT_ANNUAL_RISK_FREE_RATE = 0.0115
 
 
 @dataclass(frozen=True)
