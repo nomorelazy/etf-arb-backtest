@@ -1,6 +1,6 @@
 # 申赎套利回测系统
 
-ETF 申赎套利回测系统。支持 159338、159516、512760、512880、515880 的分钟信号、申赎执行、现金替代模拟、账户和逐笔盈亏报告。完整回测每次运行一只 ETF。
+ETF 申赎套利回测系统。支持 159338、159516、512760、512880、515880 的分钟信号、申赎执行、现金替代模拟、账户和逐笔盈亏报告。同一条命令可依次回测多只 ETF，每只独立记账。
 
 后续修改以[本轮执行基线](docs/requirements_baseline.md)及用户最新指令核对，不能将试跑参数或研究假设改写为长期要求。
 
@@ -97,7 +97,15 @@ python -m etf_arb.cli backtest --config configs/full_flow.example.json --premium
 | `settlement/cash.py` | 按交易日处理现金替代款项和 PCF 现金差额 |
 | `portfolio/account.py` | 现金与持仓投影，禁止透支及卖空；按实际模拟现金流计算交易最终盈亏 |
 
-将 `etf_codes` 设为单个基金代码，例如 `["512760"]`，并在规则文件中配置同一代码的有效期。为每只 ETF 使用独立输出目录。159516 与 159338 按深市实物模式处理，三只沪市基金按沪市实物、深市跨市场现金退补模式处理。沪市跨市场申购保证金采用 PCF 参考金额乘以（1＋申购替代溢价比例）。
+在配置的 `etf_codes` 中保留一个基金代码。多只一起跑时，在规则文件中配置各基金的有效期，并在一条命令中列出要运行的基金。
+
+```powershell
+python -m etf_arb.cli backtest --config configs/full_flow.example.json --etf 159516 512760 512880 515880 --premium-threshold 0.002
+```
+
+使用 `--etf` 时，每次命令在 `reports` 下新建一个回测目录。多只 ETF 的报告在该目录内按代码分开，例如 `reports/backtest_<运行编号>/159516/report/report.html`。单只 ETF 的报告直接放在本次回测目录的 `report` 下。需要提供实际付款时间文件时按 ETF 分别运行，以便逐笔匹配。
+
+159516 与 159338 按深市实物模式处理，三只沪市基金按沪市实物、深市跨市场现金退补模式处理。沪市跨市场申购保证金采用 PCF 参考金额乘以（1＋申购替代溢价比例）。
 
 如需申请时交收带符号的预估现金 E，设置 `simulation.settle_estimated_cash_at_application=true`。下一交易日 PCF 的 `PreTradingDay` 必须对应申请日，深市读取 `CashComponent`，沪市读取 `PreCashComponent`（旧 JSON 对应前一日的 `CashComponent`）。申购差额为 E−A，赎回为 A−E。配置 `cash_difference_lag=0` 可模拟披露当日到账。现金替代退补仍按各自定价和到账配置推进。
 

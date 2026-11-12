@@ -1,12 +1,17 @@
 import csv
 import json
+import os
+from contextlib import redirect_stdout
 from dataclasses import replace
 from datetime import date, datetime, time
 from decimal import Decimal as D
+from io import StringIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from etf_arb.cli import main
 from etf_arb.data.pcf import FilePCFRepository
 from etf_arb.data.minute_close import MinuteCloseConflictError
 from etf_arb.data.snapshot import DailyCloseCache
@@ -266,6 +271,46 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(RunnerConfig.from_json(path), self.config)
         with self.assertRaises(ValueError):
             replace(self.config, etf_codes=("510300",))
+
+    def test_cli_groups_multiple_etfs_and_continues_after_a_fund_fails(self):
+        second_fund = self.pcf / "159516"
+        second_fund.mkdir()
+        for path in (self.pcf / "159338").glob("*.xml"):
+            (second_fund / path.name).write_text(
+                path.read_text(encoding="utf-8").replace("159338", "159516"), encoding="utf-8",
+            )
+        rows = self.market_rows()
+        write_market(self.market, rows + [
+            (ts, "159516.SZ", price) for ts, code, price in rows if code == "159338.SZ"
+        ])
+        rules = self.root / "rules.json"
+        rules.write_text(json.dumps({"etf_rules": [
+            {"etf_code": code, "effective_from": DAYS[0].isoformat(), "effective_to": None,
+             "creation_enabled": True, "redemption_enabled": True}
+            for code in ("159338", "159516", "512760")
+        ]}), encoding="utf-8")
+        config_path = self.root / "config.json"
+        config = replace(self.config, rules_path=rules)
+        config_path.write_text(json.dumps(config.to_dict()), encoding="utf-8")
+        args = ["etf-arb", "backtest", "--config", str(config_path), "--etf"]
+        reports = self.root / "reports"
+        original = Path.cwd()
+        self.addCleanup(os.chdir, original)
+        os.chdir(self.root)
+        with patch("sys.argv", args + ["159338", "159516"]), redirect_stdout(StringIO()) as output:
+            self.assertEqual(main(), 0, output.getvalue())
+        first, = reports.iterdir()
+        for code in ("159338", "159516"):
+            self.assertTrue((first / code / "report/report.html").is_file())
+            snapshot = json.loads((first / code / "config.json").read_text(encoding="utf-8"))
+            self.assertEqual(snapshot["etf_codes"], [code])
+        with patch("sys.argv", args + ["512760", "159516"]), redirect_stdout(StringIO()):
+            self.assertEqual(main(), 2)
+        second, = set(reports.iterdir()) - {first}
+        self.assertTrue((second / "159516/report/report.html").is_file())
+        self.assertTrue((first / "159516/report/report.html").is_file())
+        failure = json.loads((second / "512760/run_summary.json").read_text(encoding="utf-8"))
+        self.assertEqual(failure["state"], "failed")
 
 
 if __name__ == "__main__":
