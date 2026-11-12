@@ -10,6 +10,7 @@ from pathlib import Path
 
 from etf_arb import __version__
 from etf_arb.data import ParquetMinuteCloseRepository, check_missing
+from etf_arb.data.snapshot import FULL_FLOW_ETFS
 from etf_arb.report.models import DEFAULT_ANNUAL_RISK_FREE_RATE
 
 
@@ -47,6 +48,8 @@ def build_parser() -> argparse.ArgumentParser:
         "backtest", help="run decision replay or the configured full-flow research simulation"
     )
     backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
+    backtest_parser.add_argument("--etf", nargs="+", choices=FULL_FLOW_ETFS,
+                                 help="run selected ETFs in a fresh shared directory under reports")
     backtest_parser.add_argument("--premium-threshold", type=Decimal,
                                  help="override signal threshold as a ratio (e.g. 0.005 means 0.5%%)")
 
@@ -70,7 +73,6 @@ def main() -> int:
     if args.command == "status":
         print("Core models, PCF parsing, iFinD minute-close storage and basket pricing are available.")
         print("BacktestRunner supports configuration, quality preflight, clock callbacks and decision replay.")
-        from etf_arb.data.snapshot import FULL_FLOW_ETFS
         print(f"Full-flow research simulation (one ETF per run): {', '.join(FULL_FLOW_ETFS)}.")
     elif args.command == "scan-minute-close":
         repository = ParquetMinuteCloseRepository(
@@ -115,6 +117,7 @@ def main() -> int:
         from etf_arb.runner import BacktestRunner, RunnerError
         from etf_arb.runner_config import RunnerConfig
         from etf_arb.full_flow import make_full_runner
+        from etf_arb.report.run_paths import create_report_run
 
         try:
             config = RunnerConfig.from_json(args.config)
@@ -122,22 +125,36 @@ def main() -> int:
                 if config.simulation is None:
                     raise ValueError("--premium-threshold requires a simulation configuration")
                 config = replace(config, simulation=replace(config.simulation, premium_threshold=args.premium_threshold))
-            runner = make_full_runner(config) if config.simulation is not None else BacktestRunner(config)
-            result = runner.run()
+            configs = (config,)
+            if args.etf:
+                _, directory, configs = create_report_run(
+                    config, tuple(args.etf), Path("reports"), "backtest",
+                )
+                print(f"Run directory: {directory}", flush=True)
         except (RunnerError, ValueError, TypeError, OSError) as error:
             print(f"Backtest failed: {error}")
             return 2
-        print(f"Mode: {result.mode}")
-        print(f"Trading days: {len(result.processed_dates)}")
-        print(f"Decisions: {result.engine_result.decision_count}")
-        print(f"Dispatched: {result.engine_result.dispatched_count}")
-        print(f"Outputs: {result.output_dir}")
-        if result.financial_summary is None:
-            print("This is decision replay; no trade profit or account equity has been calculated.")
-        else:
-            print(f"Research simulation final PnL: {result.financial_summary['final_net_pnl']}")
-            print(f"Pending trades: {result.financial_summary['pending_count']}")
-            print(f"HTML report: {result.output_dir / 'report' / 'report.html'}")
+        status = 0
+        for config in configs:
+            try:
+                runner = make_full_runner(config) if config.simulation is not None else BacktestRunner(config)
+                result = runner.run()
+            except (RunnerError, ValueError, TypeError, OSError) as error:
+                print(f"Backtest failed ({', '.join(config.etf_codes)}): {error}", flush=True)
+                status = 2
+                continue
+            print(f"Mode: {result.mode}")
+            print(f"Trading days: {len(result.processed_dates)}")
+            print(f"Decisions: {result.engine_result.decision_count}")
+            print(f"Dispatched: {result.engine_result.dispatched_count}")
+            print(f"Outputs: {result.output_dir}")
+            if result.financial_summary is None:
+                print("This is decision replay; no trade profit or account equity has been calculated.")
+            else:
+                print(f"Research simulation final PnL: {result.financial_summary['final_net_pnl']}")
+                print(f"Pending trades: {result.financial_summary['pending_count']}")
+                print(f"HTML report: {result.output_dir / 'report' / 'report.html'}", flush=True)
+        return status
     elif args.command == 'report-attribution':
         from etf_arb.report.rebuild import rebuild_run_report
         try:
