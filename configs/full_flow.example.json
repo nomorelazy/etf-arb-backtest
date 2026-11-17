@@ -19,7 +19,7 @@
     "max_trades_per_day": null,
     "min_trade_interval_minutes": 60,
     "blocked_trade_minutes": ["09:30"],
-    "trading_sessions": [["09:35", "11:27"], ["13:00", "14:57"]],
+    "trading_sessions": [["09:35", "11:29"], ["13:03", "14:57"]],
     "cash_substitution_pricing_days": 2,
     "cash_substitution_attempt_time": "14:30",
     "cash_substitution_lag": null,

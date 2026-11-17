@@ -6,7 +6,7 @@ from datetime import time, timedelta
 @dataclass(frozen=True)
 class TradingTimeRule:
     blocked_minutes: tuple[str, ...] = ("09:30",)
-    sessions: tuple[tuple[str, str], ...] = (("09:35", "11:27"), ("13:00", "14:57"))
+    sessions: tuple[tuple[str, str], ...] = (("09:35", "11:29"), ("13:03", "14:57"))
 
     def __post_init__(self):
         values = self.blocked_minutes

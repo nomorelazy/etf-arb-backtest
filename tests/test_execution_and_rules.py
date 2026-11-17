@@ -102,7 +102,7 @@ class ExecutionAndRulesTests(unittest.TestCase):
             ),
         )
         for hour, minute in (
-            (9, 29), (9, 30), (9, 34), (11, 28), (11, 30), (12, 0), (12, 59),
+            (9, 29), (9, 30), (9, 34), (11, 30), (13, 0), (13, 2), (12, 0), (12, 59),
             (14, 58), (15, 0),
         ):
             with self.subTest(at=(hour, minute)):
