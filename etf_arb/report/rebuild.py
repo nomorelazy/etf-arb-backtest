@@ -105,6 +105,16 @@ def rebuild_run_report(run_dir, output_dir):
                         fills, fees, pricing, substitutions, settlements,
                         read_rows(run_dir / 'substitution_attempts.csv')))
     limit_impact = with_cost_metrics(limit_impact, trades)
+    from etf_arb.report.signal_risk import build_signal_risk
+    saved_risk_path = run_dir / "signal_risk.json"
+    saved_risk = (json.loads(saved_risk_path.read_text(encoding="utf-8"))
+                  if saved_risk_path.is_file() else {})
+    signal_risk = (saved_risk if saved_risk.get("schema_version") == 1
+                   and saved_risk.get("selection_basis") == "signal_time_directional_risk"
+                   and saved_risk.get("mandatory_scope") == "pcf_mandatory_only"
+                   and isinstance(saved_risk.get("rows"), list)
+                   and isinstance(saved_risk.get("trades"), list)
+                   else build_signal_risk(config, trades, read_rows(run_dir / "signals.csv")))
     closed = [ClosedTrade(t['trade_id'], decimal(t['net_pnl'])) for t in trades
               if t['state'] == 'CLOSED' and t.get('net_pnl') not in (None, '')]
     actual_net = sum((t.pnl for t in closed), Decimal(0))
@@ -114,7 +124,7 @@ def rebuild_run_report(run_dir, output_dir):
     metrics = {row['metric']: row['value'] for row in read_rows(run_dir / 'report/metrics.csv')}
     save_report(equity, closed, output_dir, starting_cash=decimal(config['starting_cash']),
                 total_costs=decimal(summary['fee']), trade_rows=read_rows(run_dir / 'portfolio_ledger.csv'),
-                financial_summary=summary, attribution_rows=attribution, limit_impact=limit_impact,
+                financial_summary=summary, attribution_rows=attribution, limit_impact=limit_impact, signal_risk=signal_risk,
                 peak_cash_usage=decimal(metrics.get('peak_cash_usage', '0')),
                 filled_orders=int(metrics.get('filled_orders', '0')),
                 rejected_orders=int(metrics.get('rejected_orders', '0')),
@@ -123,7 +133,7 @@ def rebuild_run_report(run_dir, output_dir):
                       "(configured fees, slippage=0; proxy cash settlement)")
     save_ledger_report(output_dir / 'ledger.html', trades, read_rows(run_dir / 'cashflows.csv'),
         fills, settlements, pricing, read_rows(run_dir / 'substitution_attempts.csv'), substitutions,
-        fees, attribution_rows=attribution, limit_impact=limit_impact)
+        fees, attribution_rows=attribution, limit_impact=limit_impact, signal_risk=signal_risk)
     (output_dir / 'report_source.json').write_text(json.dumps(dict(
         source_run=str(run_dir), source_config=config, financial_summary=summary,
         report_only=True, trade_count=len(attribution),

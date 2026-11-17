@@ -99,6 +99,7 @@ def save_report(
     trade_rows: Sequence[dict] | None = None,
     financial_summary: dict | None = None,
     limit_impact: dict | None = None,
+    signal_risk: dict | None = None,
     attribution_rows: Sequence[dict] | None = None,
 ) -> BacktestSummary:
     """输出 metrics.csv、equity.csv 和 pnl_report.png。"""
@@ -173,18 +174,21 @@ def save_report(
     plt.close(fig)
     _save_html(summary, output / "report.html", chart_path.name,
                trade_rows=trade_rows, financial_summary=financial_summary,
-               attribution_rows=attribution_rows, limit_impact=limit_impact)
+               attribution_rows=attribution_rows, limit_impact=limit_impact, signal_risk=signal_risk)
     if attribution_rows is not None:
         from etf_arb.report.attribution import save_attribution_csv
         save_attribution_csv(output / "trade_attribution.csv", attribution_rows)
     if limit_impact is not None:
         from etf_arb.report.limit_impact import save_limit_impact
         save_limit_impact(output, limit_impact)
+    if signal_risk is not None:
+        from etf_arb.report.signal_risk import save_signal_risk
+        save_signal_risk(output, signal_risk)
     return summary
 
 
 def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None,
-               attribution_rows=None, limit_impact=None) -> None:
+               attribution_rows=None, limit_impact=None, signal_risk=None) -> None:
     labels = {
         "total_return": "区间收益率",
         "annualized_return": "年化收益率",
@@ -213,6 +217,8 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
         f"<tr><th>{labels[key]}</th><td>{values[key]}</td></tr>" for key in labels
     )
     details = ""
+    if signal_risk is not None:
+        details += '<p><a href="signal_risk.html">查看信号时风险敞口：逐笔汇总与个股占比</a></p>'
     if financial_summary is not None:
         final = financial_summary['final_net_pnl']
         creation_threshold = financial_summary.get('creation_threshold', financial_summary.get('premium_threshold'))
@@ -265,6 +271,9 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
     if limit_impact is not None:
         from etf_arb.report.limit_impact import limit_impact_html
         details += limit_impact_html(limit_impact)
+    if signal_risk is not None:
+        from etf_arb.report.signal_risk import signal_risk_html
+        details += signal_risk_html(signal_risk)
     if trade_rows is not None:
         quality = ('<a href="../quality/summary.json">数据缺失检查</a>'
                    if (path.parent.parent / 'quality/summary.json').is_file()
