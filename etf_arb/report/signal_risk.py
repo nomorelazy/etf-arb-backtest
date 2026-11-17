@@ -207,7 +207,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
                 if previous_issue:
                     status = 'unknown:reference_' + previous_issue
             kind, source = status.split(":", 1) if status else ("normal", limits.bounds.get(symbol, (None, "unknown"))[1])
-            if source == "estimated":
+            if source in {"estimated", "estimated_open_0930_proxy"}:
                 estimated += 1
             relevant = "limit_up" if trade["side"] == "CREATE" else "limit_down"
             if kind == relevant:
@@ -291,7 +291,9 @@ def signal_risk_html(data, *, trade_id=None):
             '占比＝该股信号篮子估值÷（信号 IOPV×本笔 ETF 份数）。必须现金替代使用当日 PCF 固定申购金额作为统一比较基准，包括数量为零的固定现金行；'
             '不计虚拟申赎现金汇总行，也不把跨市场允许替代股票自动计为必须替代。</p>'
             '<p>三类可重叠，总敞口按股票去重；金额为按上述分类的信号时名义敞口，不是实时净风险、预计亏损或新增现金扣款。固定现金替代金额也不等同于尚未锁价的股价风险。'
-            '信号缺价不取前一分钟或未来价格补值；缺停牌资料不等于未停牌。涨跌停来源标为“估算”时，仅按分钟 close 与估算限价判断，不代表盘口封单。</p>')
+            '信号缺价不取前一分钟或未来价格补值；缺停牌资料不等于未停牌。前收盘估算与 09:30 close 开盘代理估算均计入估算限价数量。'
+            '开盘代理仅在缺少原可算限价时使用当日 09:30 精确 close；这不是真实开盘价或交易所限价。'
+            '缺少该分钟价格仍为未确定；触及估算限价不代表盘口封单。</p>')
     doc += f'<p>共 {len(trades)} 笔，{unknown_trades} 笔敞口覆盖或估值未完整；下表“已识别”数值仅为已知部分。百分比不跨交易合计。</p>'
     doc += '<table style="width:100%;table-layout:fixed;overflow-wrap:anywhere"><thead><tr>'
     doc += ''.join(f'<th>{heading}</th>' for heading in ('交易／信号时间', '方向', '涨跌停敞口／占比', '停牌敞口／占比', '必须现金替代／占比', '去重总敞口／占比', '股票数／识别覆盖'))
@@ -310,7 +312,8 @@ def signal_risk_html(data, *, trade_id=None):
         tags = '、'.join(LABELS[tag] for tag in row['risk_tags'].split(';'))
         basis = {'pcf_creation_fixed_cash': 'PCF固定金额',
                  'exact_signal_minute_close': '信号分钟价格×股数'}.get(row['valuation_basis'], '替代标志未确定')
-        source = {'provided': '提供的限价', 'estimated': '前收盘估算'}.get(row['limit_source'], '未确定')
+        source = {'provided': '提供的限价', 'estimated': '前收盘估算',
+                  'estimated_open_0930_proxy': '09:30 close 开盘代理估算'}.get(row['limit_source'], '未确定')
         doc += (f'<tr><td>{text(row["trade_id"])}<br>{text(row["opened_at"])}</td>'
             f'<td>{text(row["symbol"])} {text(row["security_name"])}<br>{"申购" if row["side"] == "CREATE" else "赎回"}</td>'
             f'<td>{text(tags)}</td><td>{number(row["quantity"])}</td><td>{number(row["signal_price"])} / {basis}</td>'

@@ -336,7 +336,7 @@ def limit_impact_html(data, *, id_suffix=""):
 {unknown} 笔存在无法判断的股票（详见逐笔检查表）。</p>
 <p class="note">仅按发起套利的 t 分钟筛选：申购买股票、赎回买 ETF 时，锁定当时已涨跌停的成分股。
 入场时正常、后来申赎提交、补券或卖出时才涨跌停的股票不纳入；后续成交和估值只用于计算已选股票的盈亏。
-涨跌停指分钟 close 触及限价，不代表封单或一定无法成交；“推算”使用前交易日收盘价和板块规则，除权等特殊情形需正式限价数据。
+涨跌停指分钟 close 触及限价，不代表封单或一定无法成交；前收盘估算使用前交易日收盘价和板块规则。缺少原可算限价时，使用当日 09:30 精确 close 作开盘代理估算，注明开盘代理价；这不是真实开盘价或交易所限价，缺少该分钟价格仍为未确定。除权等特殊情形仍需正式限价数据。
 ETF 估算权重＝该笔 PCF 股数×信号价÷（信号 IOPV×ETF 份数），不是指数官方权重。</p>
 <p class="note">个股盈亏以信号时该股估值为基准：申购减去实际买入成本，赎回为实际卖出净额减基准，均含该股费用。
 本市场申购补券按配置的 T+2 日 14:30 尝试，未买入部分按期限日收盘估值；跨市场按申请后首个可成交分钟定价。
@@ -357,7 +357,9 @@ ETF 估算权重＝该笔 PCF 股数×信号价÷（信号 IOPV×ETF 份数）�
     for r in rows:
         kinds = r["limit_types"].replace("limit_up", "涨停").replace("limit_down", "跌停")
         stages = "／".join(STAGES.get(s, s) for s in r["limit_stages"].split(";"))
-        source = r["limit_sources"].replace("estimated", "推算").replace("provided", "提供的限价")
+        source = "；".join({"estimated": "前收盘估算",
+            "estimated_open_0930_proxy": "09:30 close 开盘代理估算",
+            "provided": "提供的限价"}.get(value, value) for value in r["limit_sources"].split(";"))
         weight = "未确定" if r["etf_weight"] in (None, "") else f"{decimal(r['etf_weight']):.4%}"
         method = "／".join(METHODS.get(m, m) for m in r["pricing_method"].split(";") if m) or "未定价"
         if r.get("last_execution_at"):

@@ -7,6 +7,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from etf_arb.data.snapshot import DailyCloseCache, component_symbol
 from etf_arb.rules.a_share import AShareBoard, a_share_price_limit_rate
 from etf_arb.rules.errors import RuleNotFoundError
+from etf_arb.rules.limit_reference import load_limit_references, opening_proxy_is_future
 
 
 TOLERANCE = Decimal("0.000001")
@@ -56,6 +57,7 @@ class ReportPriceLimits:
     def __init__(self, prices, minute_root, bounds_path=None):
         self.prices = prices
         self.previous = DailyCloseCache(minute_root)
+        self.opening = DailyCloseCache(minute_root)
         self.provided = load_daily_bounds(bounds_path)
         self.bounds = {}
 
@@ -71,13 +73,9 @@ class ReportPriceLimits:
         self.bounds = {symbol: (self.provided[day, symbol], "provided")
                        for symbol in components if (day, symbol) in self.provided}
         estimated_symbols = components.keys() - self.bounds.keys()
-        previous_day = pcf.pre_trading_day
-        previous_close = None
-        if estimated_symbols and previous_day is not None and previous_day < day:
-            previous_close = datetime.combine(previous_day, time(15))
-            self.previous.load(previous_day, estimated_symbols, at=previous_close.time())
+        references = load_limit_references(pcf, estimated_symbols, self.previous, self.opening)
         for symbol in sorted(estimated_symbols):
-            reference = self.previous.get(symbol, previous_close, exact=True) if previous_close else None
+            reference, source = references[symbol]
             if reference is None:
                 self.bounds[symbol] = (None, "missing_previous_close")
                 continue
@@ -115,10 +113,12 @@ class ReportPriceLimits:
                 self.bounds[symbol] = (None, "needs_official_bounds")
                 continue
             tick = rule.tick_size if rule and rule.tick_size is not None else STOCK_TICK
-            self.bounds[symbol] = (estimate_bounds(reference.close, up, down, tick), "estimated")
+            self.bounds[symbol] = (estimate_bounds(reference.close, up, down, tick), source)
 
     def status(self, symbol, now):
         bounds, source = self.bounds.get(symbol, (None, "missing_bounds"))
+        if opening_proxy_is_future(source, now):
+            return "unknown:opening_proxy_not_yet_available"
         if bounds is None:
             return f"unknown:{source}"
         upper, lower = bounds

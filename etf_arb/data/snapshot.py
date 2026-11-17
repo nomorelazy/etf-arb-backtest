@@ -45,16 +45,18 @@ class DailyCloseCache:
         self.bars = {}
         self.times = {}
 
-    def load(self, day, symbols):
+    def load(self, day, symbols, *, at=None):
         files = sorted((self.root / f"{day:%Y-%m}").glob("*.parquet"))
         self.day, self.bars, self.times = day, {}, {}
         if not files:
             return
         start = datetime.combine(day, time.min)
+        time_filter = (ds.field("time") >= start) & (ds.field("time") < start + timedelta(days=1))
+        if at is not None:
+            time_filter = ds.field("time") == datetime.combine(day, at)
         table = ds.dataset([str(p) for p in files], format="parquet").to_table(
             columns=["time", "thscode", "close"],
-            filter=(ds.field("time") >= start) & (ds.field("time") < start + timedelta(days=1))
-            & ds.field("thscode").isin(sorted(symbols)),
+            filter=time_filter & ds.field("thscode").isin(sorted(symbols)),
         )
         rows = {}
         for ts, code, raw in zip(*(table[n].to_pylist() for n in ("time", "thscode", "close"))):
