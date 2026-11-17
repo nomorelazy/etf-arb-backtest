@@ -98,6 +98,7 @@ def save_report(
     title: str = "ETF Arbitrage Backtest",
     trade_rows: Sequence[dict] | None = None,
     financial_summary: dict | None = None,
+    limit_impact: dict | None = None,
     attribution_rows: Sequence[dict] | None = None,
 ) -> BacktestSummary:
     """输出 metrics.csv、equity.csv 和 pnl_report.png。"""
@@ -172,15 +173,18 @@ def save_report(
     plt.close(fig)
     _save_html(summary, output / "report.html", chart_path.name,
                trade_rows=trade_rows, financial_summary=financial_summary,
-               attribution_rows=attribution_rows)
+               attribution_rows=attribution_rows, limit_impact=limit_impact)
     if attribution_rows is not None:
         from etf_arb.report.attribution import save_attribution_csv
         save_attribution_csv(output / "trade_attribution.csv", attribution_rows)
+    if limit_impact is not None:
+        from etf_arb.report.limit_impact import save_limit_impact
+        save_limit_impact(output, limit_impact)
     return summary
 
 
 def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None,
-               attribution_rows=None) -> None:
+               attribution_rows=None, limit_impact=None) -> None:
     labels = {
         "total_return": "区间收益率",
         "annualized_return": "年化收益率",
@@ -258,6 +262,9 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
     if attribution_rows is not None:
         from etf_arb.report.attribution import attribution_html
         details += attribution_html(attribution_rows)
+    if limit_impact is not None:
+        from etf_arb.report.limit_impact import limit_impact_html
+        details += limit_impact_html(limit_impact)
     if trade_rows is not None:
         quality = ('<a href="../quality/summary.json">数据缺失检查</a>'
                    if (path.parent.parent / 'quality/summary.json').is_file()

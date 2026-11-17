@@ -21,7 +21,7 @@ def _table(rows):
 
 
 def save_ledger_report(path, trades, cashflows, fills, settlements, pricing_rows=(), attempt_rows=(), creation_substitutions=(), fee_rows=(),
-                       *, attribution_rows=()):
+                       *, attribution_rows=(), limit_impact=None):
     groups = []
     for records in (cashflows, fills, settlements, pricing_rows, attempt_rows, creation_substitutions, fee_rows):
         grouped = defaultdict(list)
@@ -56,6 +56,11 @@ th,td{border:1px solid #ddd;padding:7px 10px;text-align:right}th{background:#f4f
             document += "<h2>信号价差、最终盈亏及两类现金影响</h2>" + _table(
                 {'项目': key, '数值': value}
                 for key, value in display_row(attribution_by_id[tid]).items())
+        if limit_impact is not None:
+            from etf_arb.report.limit_impact import limit_impact_html
+            document += limit_impact_html(dict(
+                rows=[r for r in limit_impact['rows'] if r['trade_id'] == tid],
+                coverage=[r for r in limit_impact['coverage'] if r['trade_id'] == tid]), id_suffix=tid)
         document += _table([trade]) + "<h2>全部账户现金及证券事件</h2>" + _table(flows)
         document += "<h2>投资者成交</h2>" + _table(row for row in groups[1][tid] if row['purpose'] != 'MANAGER')
         document += "<h2>逐笔交易税费（投资者扣款与代买卖费用分别标记）</h2>" + _table(groups[6][tid])
