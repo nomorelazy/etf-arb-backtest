@@ -169,11 +169,9 @@ def limit_value_html(data):
 <div class="lv-tools"><label>交易方向 <select id="lv-side"><option value="all">全部方向</option><option value="CREATE">申购</option><option value="REDEEM">赎回</option></select></label>
 <label>显示 <select id="lv-filter"><option value="all">全部交易</option><option value="hit">已识别有涨跌停</option><option value="local">有{market}方向性敞口</option>
 <option value="unknown">有待核股票</option></select></label><span class="lv-status" id="lv-status" aria-live="polite"></span></div>
-<div class="lv-scroll"><table id="lv-values"><thead><tr><th class="lv-left">信号时间 / 交易</th><th class="lv-c">方向</th><th>全篮涨停市值</th><th>全篮跌停市值</th><th>涨跌停总市值</th>
+<div class="lv-scroll" role="region" tabindex="0" aria-labelledby="lv-title"><table id="lv-values"><thead><tr><th class="lv-left">信号时间 / 交易</th><th class="lv-c">方向</th><th>全篮涨停市值</th><th>全篮跌停市值</th><th>涨跌停总市值</th>
 <th>本笔 ETF 篮子净值<small>IOPV × ETF 份额</small></th><th>涨跌停总市值<br>占净值比例</th><th>{market}方向性敞口<small>市值 / 净值占比</small></th><th class="lv-c">识别覆盖 / 明细</th></tr></thead>'''
-    footer = '''</table></div><p id="lv-empty" hidden>当前条件下没有可显示的交易。</p>
-<div class="lv-pages"><button id="lv-prev" type="button">上一页</button><span id="lv-page" aria-live="polite"></span>
-<button id="lv-next" type="button">下一页</button></div></section>'''
+    footer = '</table></div><p id="lv-empty" hidden>当前条件下没有可显示的交易。</p></section>'
     return ("<style>" + _CSS + "</style>" + title + header
             + "".join(_trade_rows(row, index) for index, row in enumerate(rows, 1)) + footer
             + "<script>" + _JS + "</script>")
@@ -188,10 +186,10 @@ _CSS = """
 #limit-values summary, #limit-values button, #limit-values select { cursor: pointer; }
 #limit-values .lv-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 16px; margin: 18px 0 10px; }
 #limit-values :is(button,select) { font: inherit; color: #23384e; background: white; border: 1px solid #a3afbc; border-radius: 4px; padding: 4px 8px; }
-#limit-values button[disabled] { opacity: .43; cursor: default; }
 #limit-values .lv-tools label { white-space: nowrap; }
 #limit-values .lv-status { margin-left: auto; color: #46515e; font-size: .9rem; }
-#limit-values .lv-scroll { overflow-x: auto; }
+#limit-values .lv-scroll { max-height: 70vh; overflow: auto; }
+#lv-values > thead th { position: sticky; top: 0; z-index: 1; }
 #limit-values table { margin: 0; width: 100%; min-width: 940px; font-size: .91rem; line-height: 1.5; font-variant-numeric: tabular-nums; }
 #limit-values th, #limit-values td { padding: 9px 10px; text-align: right; vertical-align: top; }
 #limit-values th { background: #f0f3f6; font-weight: 600; }
@@ -206,12 +204,11 @@ _CSS = """
 #limit-values .lv-detail h3 { font-size: 1rem; margin: 4px 0 6px; }
 #limit-values .lv-detail table { min-width: 640px; max-width: 1100px; font-size: .86rem; }
 #limit-values .lv-detail :is(th,td) { border-bottom-color: #dde3e9; padding: 5px 10px; }
-#limit-values .lv-pages { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 12px; }
 #limit-values [hidden] { display: none !important; }
 .lv-top { margin: -4px 0 16px; line-height: 1.6; }
 .lv-top a { margin-left: .7rem; }
 @media(max-width:760px){ #limit-values .lv-status { width: 100%; margin-left: 0; } }
-@media print { #limit-values .lv-tools,#limit-values .lv-pages,#limit-values .lv-inspect,.lv-top a { display: none; } #limit-values tbody.lv-trade[hidden] { display: table-row-group !important; } #limit-values .lv-scroll { overflow: visible; } }
+@media print { #limit-values .lv-tools,#limit-values .lv-inspect,.lv-top a { display: none; } #limit-values tbody.lv-trade[hidden] { display: table-row-group !important; } #limit-values .lv-scroll { max-height: none; overflow: visible; } #lv-values > thead th { position: static; } }
 """
 
 _JS = """
@@ -220,30 +217,21 @@ _JS = """
   const rows = Array.from(section.querySelectorAll("tbody.lv-trade"));
   const side = section.querySelector("#lv-side");
   const state = section.querySelector("#lv-filter");
-  const prev = section.querySelector("#lv-prev");
-  const next = section.querySelector("#lv-next");
-  const size = 15;
-  let page = 0;
-  function draw() {
-    const matches = rows.filter(row =>
-      (side.value === "all" || row.dataset.side === side.value) &&
-      (state.value === "all" || row.dataset[state.value] === "yes"));
-    const pages = Math.ceil(matches.length / size);
-    page = Math.min(page, Math.max(0, pages - 1));
-    const start = page * size;
-    const visible = new Set(matches.slice(start, start + size));
-    rows.forEach(row => { row.hidden = !visible.has(row); });
-    section.querySelector("#lv-status").textContent = matches.length
-      ? "共 " + matches.length + " 笔，显示第 " + (start + 1) + "–" + Math.min(start + size, matches.length) + " 笔"
-      : "没有符合筛选条件的交易";
-    section.querySelector("#lv-page").textContent = pages ? (page + 1) + " / " + pages : "0 / 0";
-    section.querySelector("#lv-empty").hidden = matches.length > 0;
-    prev.disabled = page === 0;
-    next.disabled = page + 1 >= pages;
+  const viewport = section.querySelector(".lv-scroll");
+  function filterRows() {
+    let count = 0;
+    for (const row of rows) {
+      const matches = (side.value === "all" || row.dataset.side === side.value) &&
+        (state.value === "all" || row.dataset[state.value] === "yes");
+      row.hidden = !matches;
+      if (matches) count++;
+    }
+    section.querySelector("#lv-status").textContent = count === rows.length
+      ? "共 " + count + " 笔" : "显示 " + count + " 笔，共 " + rows.length + " 笔";
+    section.querySelector("#lv-empty").hidden = count > 0;
+    viewport.scrollTop = 0;
   }
-  for (const filter of [side, state]) filter.addEventListener("change", () => { page = 0; draw(); });
-  prev.addEventListener("click", () => { if (page > 0) page--; draw(); });
-  next.addEventListener("click", () => { page++; draw(); });
+  for (const filter of [side, state]) filter.addEventListener("change", filterRows);
   section.addEventListener("click", event => {
     const button = event.target.closest(".lv-inspect");
     if (!button) return;
@@ -253,6 +241,6 @@ _JS = """
     button.setAttribute("aria-expanded", String(open));
     button.textContent = open ? "收起明细" : "查看明细";
   });
-  draw();
+  filterRows();
 })();
 """

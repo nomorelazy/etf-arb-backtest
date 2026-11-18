@@ -24,10 +24,20 @@ class ReportHeadings(HTMLParser):
         super().__init__()
         self.h2 = []
         self.current = None
+        self.scroll_regions = []
+        self.ids = set()
+        self.detail_controls = []
 
     def handle_starttag(self, tag, attrs):
         if tag == 'h2':
             self.current = []
+        attrs = dict(attrs)
+        if 'id' in attrs:
+            self.ids.add(attrs['id'])
+        if 'lv-scroll' in attrs.get('class', '').split():
+            self.scroll_regions.append(attrs)
+        if tag == 'button' and 'lv-inspect' in attrs.get('class', '').split():
+            self.detail_controls.append(attrs.get('aria-controls'))
 
     def handle_data(self, data):
         if self.current is not None:
@@ -51,6 +61,16 @@ class ApprovedTemplateTests(unittest.TestCase):
         self.assertEqual([h for h in headings.h2 if h in order], order)
         self.assertEqual(report.count('id="limit-values"'), 1)
         self.assertIn('href="#limit-values"', report)
+        scroll, = headings.scroll_regions
+        self.assertEqual(scroll.get('role'), 'region')
+        self.assertEqual(scroll.get('tabindex'), '0')
+        self.assertTrue({'lv-values', 'lv-side', 'lv-filter'} <= headings.ids)
+        self.assertTrue(headings.detail_controls)
+        self.assertTrue(all(target in headings.ids for target in headings.detail_controls))
+        self.assertFalse({'lv-prev', 'lv-page', 'lv-next'} & headings.ids)
+        self.assertRegex(report, r'\.lv-scroll\s*\{[^}]*\boverflow(?:-y)?\s*:\s*(auto|scroll)')
+        self.assertRegex(report, r'\.lv-scroll\s*\{[^}]*max-(height|block-size)\s*:')
+        self.assertRegex(report, r'thead[^{}]*\{[^}]*position\s*:\s*sticky')
 
     def test_runner_and_offline_cli_use_same_snapshot_and_six_column_ledger(self):
         case = fixtures.FullFlowTests()
