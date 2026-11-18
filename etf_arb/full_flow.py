@@ -10,6 +10,8 @@ from etf_arb.data.snapshot import DailyCloseCache
 from etf_arb.decision.premium import PremiumDiscountSource
 from etf_arb.execution.simulator import ArbitrageSimulator
 from etf_arb.report.render import save_report
+from etf_arb.report.limit_value import build_limit_value, save_limit_value
+from etf_arb.report.limit_exposure import build_from_saved_records, save_limit_exposure
 from etf_arb.report.ledger import save_ledger_report
 from etf_arb.report.limit_impact import build_limit_impact, save_limit_impact
 from etf_arb.report.signal_risk import build_signal_risk, save_signal_risk
@@ -194,14 +196,23 @@ def make_full_runner(config, *, rules=None):
         attribution_rows = build_trade_attribution(trade_rows, source.rows, executor.fills,
             settlement_rows, executor.fee_rows, executor.substitution_pricing)
         save_attribution_csv(output / "trade_attribution.csv", attribution_rows)
+        limit_value = build_limit_value(config, trade_rows, source.rows, rules=resources.rules)
+        save_limit_value(output, limit_value)
+        limit_exposure = build_from_saved_records(
+            config, trade_rows, [asdict(order) for order in executor.orders], executor.fills,
+            executor.fee_rows, executor.substitution_pricing, source.rows,
+            substitutions=executor.creation_substitutions, attempts=executor.substitution_attempts,
+            settlements=settlement_rows, stock_rows=limit_impact["rows"], rules=resources.rules)
+        save_limit_exposure(output, limit_exposure)
         save_ledger_report(output / "report/ledger.html", trade_rows, account.rows,
                            executor.fills, settlement_rows, executor.substitution_pricing,
                            executor.substitution_attempts, executor.creation_substitutions, executor.fee_rows,
                            attribution_rows=attribution_rows, limit_impact=limit_impact, signal_risk=signal_risk)
         save_report(executor.equity_curve, resources.portfolio.to_closed_trades(), output / "report",
-                    starting_cash=config.starting_cash,
+                    starting_cash=config.starting_cash, limit_value=limit_value,
                     trade_rows=resources.portfolio.to_rows(), financial_summary=summary,
                     attribution_rows=attribution_rows, limit_impact=limit_impact, signal_risk=signal_risk,
+                    limit_exposure=limit_exposure,
                     total_costs=fee_totals["total"],
                     title=f"{etf_code} Research simulation (configured fees, slippage=0; proxy cash settlement)",
                     peak_cash_usage=max(Decimal("0"), max((config.starting_cash - row["cash_balance"] for row in account.rows), default=Decimal("0"))),

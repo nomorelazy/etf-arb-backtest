@@ -16,6 +16,9 @@ from etf_arb.report.attribution import (SIGNAL_BASIS_FIELDS, build_trade_attribu
     decimal, signal_reference, timestamp)
 from etf_arb.report.io import load_equity_csv
 from etf_arb.report.ledger import save_ledger_report
+from etf_arb.report.limit_exposure import build_from_saved_records, planned_execution_limit_exposure
+from etf_arb.report.limit_value import limit_value_from_run
+from etf_arb.report.prior_closes import prior_closes_match
 from etf_arb.report.models import ClosedTrade
 from etf_arb.report.render import save_report
 
@@ -79,6 +82,23 @@ def restore_signal_references(config, trades, decisions, substitutions):
         trade.update(signal_reference(plan, pcf, int(trade['quantity_units']), price_at))
 
 
+def saved_limit_exposure(run_dir, config, trades, fills, fees, pricing, signals, substitutions, settlements, impact):
+    """Prefer the observed execution snapshot. Legacy runs may have only a subset of block reasons."""
+    cache = run_dir / 'limit_exposure.json'
+    cached = json.loads(cache.read_text(encoding='utf-8')) if cache.is_file() else {}
+    orders = read_rows(run_dir / 'orders.csv')
+    inputs = dict(substitutions=substitutions, settlements=settlements, stock_rows=impact['rows'])
+    if cached.get('records_available') and cached.get('selection_basis') == 'recorded_directional_limit_delay':
+        return planned_execution_limit_exposure(cached, config, trades, orders, fills, pricing, **inputs)
+    block_log = run_dir / 'execution_limit_blocks.csv'
+    enforced = (config.get('simulation') or {}).get('enforce_stock_price_limits')
+    blocks = read_rows(block_log) if block_log.is_file() and enforced is not False else None
+    return build_from_saved_records(
+        config, trades, orders, fills, fees, pricing, signals, **inputs, execution_blocks=blocks,
+        attempts=read_rows(run_dir / 'substitution_attempts.csv'),
+        redemption_risks=read_rows(run_dir / 'redemption_price_risks.csv'))
+
+
 def rebuild_run_report(run_dir, output_dir):
     run_dir, output_dir = Path(run_dir).resolve(), Path(output_dir).resolve()
     if output_dir.exists() and any(output_dir.iterdir()):
@@ -86,13 +106,14 @@ def rebuild_run_report(run_dir, output_dir):
     config = json.loads((run_dir / 'config.json').read_text(encoding='utf-8'))
     summary = json.loads((run_dir / 'financial_summary.json').read_text(encoding='utf-8'))
     trades = read_rows(run_dir / 'trades.csv')
+    signals = read_rows(run_dir / 'signals.csv')
     fills = read_rows(run_dir / 'fills.csv')
     settlements = read_rows(run_dir / 'cash_settlements.csv')
     fees = read_rows(run_dir / 'fees.csv')
     pricing = read_rows(run_dir / 'substitution_pricing.csv')
     substitutions = read_rows(run_dir / 'creation_substitutions.csv')
     restore_signal_references(config, trades, read_rows(run_dir / 'decisions.csv'), substitutions)
-    attribution = build_trade_attribution(trades, read_rows(run_dir / 'signals.csv'), fills,
+    attribution = build_trade_attribution(trades, signals, fills,
                                          settlements, fees, pricing)
     from etf_arb.report.limit_impact import build_limit_impact
     from etf_arb.report.stock_cost import with_cost_metrics
@@ -100,8 +121,9 @@ def rebuild_run_report(run_dir, output_dir):
     saved_data = (json.loads(saved_limit_impact.read_text(encoding='utf-8'))
                   if saved_limit_impact.is_file() else {})
     limit_impact = (saved_data if saved_data.get('schema_version') == 3
-                    and saved_data.get('selection_basis') == 'trade_open' else
-                    build_limit_impact(config, trades, read_rows(run_dir / 'signals.csv'),
+                    and saved_data.get('selection_basis') == 'trade_open'
+                    and prior_closes_match(saved_data, config) else
+                    build_limit_impact(config, trades, signals,
                         fills, fees, pricing, substitutions, settlements,
                         read_rows(run_dir / 'substitution_attempts.csv')))
     limit_impact = with_cost_metrics(limit_impact, trades)
@@ -109,8 +131,11 @@ def rebuild_run_report(run_dir, output_dir):
     saved_risk_path = run_dir / "signal_risk.json"
     saved_risk = (json.loads(saved_risk_path.read_text(encoding="utf-8"))
                   if saved_risk_path.is_file() else {})
-    signal_risk = (saved_risk if is_current_signal_risk(saved_risk) else
-                   build_signal_risk(config, trades, read_rows(run_dir / "signals.csv")))
+    signal_risk = (saved_risk if is_current_signal_risk(saved_risk) and prior_closes_match(saved_risk, config) else
+                   build_signal_risk(config, trades, signals))
+    limit_value = limit_value_from_run(run_dir, config, trades, signals)
+    limit_exposure = saved_limit_exposure(
+        run_dir, config, trades, fills, fees, pricing, signals, substitutions, settlements, limit_impact)
     closed = [ClosedTrade(t['trade_id'], decimal(t['net_pnl'])) for t in trades
               if t['state'] == 'CLOSED' and t.get('net_pnl') not in (None, '')]
     actual_net = sum((t.pnl for t in closed), Decimal(0))
@@ -121,6 +146,7 @@ def rebuild_run_report(run_dir, output_dir):
     save_report(equity, closed, output_dir, starting_cash=decimal(config['starting_cash']),
                 total_costs=decimal(summary['fee']), trade_rows=read_rows(run_dir / 'portfolio_ledger.csv'),
                 financial_summary=summary, attribution_rows=attribution, limit_impact=limit_impact, signal_risk=signal_risk,
+                limit_exposure=limit_exposure, limit_value=limit_value,
                 peak_cash_usage=decimal(metrics.get('peak_cash_usage', '0')),
                 filled_orders=int(metrics.get('filled_orders', '0')),
                 rejected_orders=int(metrics.get('rejected_orders', '0')),

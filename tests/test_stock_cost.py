@@ -26,6 +26,30 @@ class StockCostTests(unittest.TestCase):
         self.assertFalse(result['fee_only'])
         self.assertEqual(cost_metrics('8', '2', 2000, 10000)['etf_cost_impact'], D('-8'))
 
+    def test_directional_html_uses_gross_prices_and_preserves_all_side_source(self):
+        at = "2025-01-02 09:35"
+        template = dict(opened_at=at, trade_id="T1", side="CREATE", quantity=100, etf_shares=1000,
+            basket_value=10000, limit_stages="signal", limit_sources="provided", etf_weight=".10",
+            signal_price=10, pricing_method="next_minute_close", execution_price=11,
+            route="physical", security_name="", filled_quantity=100, valued_quantity=0,
+            stock_pnl=-102, investor_stock_fees=2, manager_fees=0)
+        # A ledger slice contains only rows and coverage. Its cached summary counts all directions.
+        for side, direction, other in [("CREATE", "limit_up", "limit_down"),
+                                       ("REDEEM", "limit_down", "limit_up")]:
+            rows = [dict(template, side=side, symbol="000001.SZ", limit_types=direction),
+                    dict(template, side=side, symbol="600000.SH", limit_types=other)]
+            coverage = [dict(trade_id="T1", side=side, opened_at=at, limit_stock_count=2,
+                             limit_symbols="000001.SZ;600000.SH", unknown_stock_count=1)]
+            source = with_cost_metrics(dict(rows=rows, coverage=coverage))
+            html = limit_impact_html(source, id_suffix="T1")
+            self.assertIn("000001.SZ", html)
+            self.assertNotIn("600000.SH", html)
+            self.assertIn("<td>-100.00</td><td>100.00</td>", html)
+            self.assertIn("<td>1</td><td>000001.SZ</td><td>1</td>", html)
+            self.assertEqual(source["coverage"][0]["limit_stock_count"], 2)
+            self.assertEqual(len(source["rows"]), 2)
+            self.assertEqual(source["rows"][0]["etf_cost_impact"], D("102"))
+
     def test_hide_only_exact_fee_loss_not_small_or_unknown_pnl(self):
         self.assertTrue(cost_metrics('-2', 2, 100, 1000)['fee_only'])
         for pnl, fee in [('-1.999999', 2), (0, 0), (None, 2), (-2, None)]:

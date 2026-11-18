@@ -17,6 +17,7 @@ import pyarrow.dataset as ds
 
 from etf_arb.data.minute_close import MinuteCloseBar, MinuteCloseConflictError
 from etf_arb.data.pcf import FilePCFRepository
+from etf_arb.report.prior_closes import PriorCloses, report_prior_path
 from etf_arb.data.snapshot import component_symbol
 from etf_arb.domain import Side
 from etf_arb.execution.plan import build_plan
@@ -228,7 +229,8 @@ def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), su
     prices.read(requests)
     limit_filter = ReportPriceLimits(prices, setting("minute_root"),
         Path(setting("daily_price_limits_path")) if setting("daily_price_limits_path") else None)
-    limit_filter.previous = prices
+    limit_filter.previous = PriorCloses(prices, report_prior_path(config))
+    data["prior_closes_sha256"] = limit_filter.previous.sha256
     active = None
     hits, unknown, counts = defaultdict(list), defaultdict(set), defaultdict(int)
     # One bounds calculation per opening date/ETF, using that date's PCF.
@@ -304,16 +306,26 @@ def save_limit_impact(output, data):
 
 
 def limit_impact_html(data, *, id_suffix=""):
-    data = with_cost_metrics(data)
-    all_rows, coverage = data["rows"], data["coverage"]
+    """Render the report-opening direction and price-only view of the saved all-side attribution."""
+    direction = {"CREATE": "limit_up", "REDEEM": "limit_down"}
+    selected = [row for row in data["rows"]
+                if row["limit_types"] == direction.get(row["side"])
+                and row["limit_stages"] == "signal"
+                and (not row.get("first_limit_at")
+                     or timestamp(row["first_limit_at"]) == timestamp(row["opened_at"]))]
+    all_rows = with_cost_metrics({"rows": selected}, price_only=True)["rows"]
+    symbols = defaultdict(set)
+    for row in selected:
+        symbols[row["trade_id"]].add(row["symbol"])
+    coverage = [dict(row, limit_stock_count=len(symbols[row["trade_id"]]),
+                     limit_symbols=";".join(sorted(symbols[row["trade_id"]])))
+                for row in data["coverage"]]
     hidden = [r for r in all_rows if r["fee_only"]]
     rows = [r for r in all_rows if not r["fee_only"]]
-    hidden_fees = sum((decimal(r["stock_fees"]) for r in hidden), ZERO)
-    visibility_note = (f"<p>明细已隐藏 {len(hidden)} 条仅由税费产生盈亏的股票，"
-                         f"对应税费 {hidden_fees:,.2f} 元；当前展示 {len(rows)} 条。"
+    visibility_note = (f"<p>明细已隐藏 {len(hidden)} 条价格影响为零、原盈亏仅来自税费的股票；当前展示 {len(rows)} 条。"
                          "原成交、税费、整笔总盈亏及全部明细 CSV 均保留。</p>"
-                         "<p>ETF 整篮成本影响＝该股含费盈亏的相反数；正数表示申购成本增加，"
-                         "赎回时表示净回收减少（等价成本增加）。每份影响除以本笔 ETF 份数；"
+                         "<p>ETF 整篮成本影响＝该股纯价格影响的相反数，不含交易税费；正数表示申购价格成本增加，"
+                         "赎回时表示卖出回收减少（等价成本增加）。每份影响除以本笔 ETF 份数；"
                          "成本影响比例除以信号 IOPV×本笔 ETF 份数，仅为信号整篮估值的比例。"
                          "不代表 ETF 市场价格被实际推动，也不再次计入总盈亏。缺失金额保留未确定。</p>")
     suffix = "-" + quote(id_suffix, safe="") if id_suffix else ""
@@ -331,28 +343,30 @@ def limit_impact_html(data, *, id_suffix=""):
 
     touched = sum(int(r["limit_stock_count"]) > 0 for r in coverage)
     unknown = sum(int(r["unknown_stock_count"]) > 0 for r in coverage)
-    doc = f'''<section id="stock-limit-impact{suffix}"><h2>买入时涨跌停股票盈亏</h2>
-<p>检查 {len(coverage)} 笔交易的入场分钟；{touched} 笔在买入时涉及涨跌停，合计 {len(all_rows)} 个“交易×股票”；
+    doc = f'''<section id="stock-limit-impact{suffix}"><h2>申购涨停／赎回跌停股票价格影响（不含税费）</h2>
+<p>检查 {len(coverage)} 笔交易的入场分钟；{touched} 笔涉及申购涨停或赎回跌停，合计 {len(all_rows)} 个“交易×股票”；
 {unknown} 笔存在无法判断的股票（详见逐笔检查表）。</p>
-<p class="note">仅按发起套利的 t 分钟筛选：申购买股票、赎回买 ETF 时，锁定当时已涨跌停的成分股。
+<p class="note">仅按发起套利的 t 分钟筛选：申购只保留当时涨停的成分股，赎回只保留当时跌停的成分股。
+申购中的跌停、赎回中的涨停不纳入本表。已选股票若在 t+1 恢复成交，仍保留其实际成交及盈亏，不额外假定延迟。
 入场时正常、后来申赎提交、补券或卖出时才涨跌停的股票不纳入；后续成交和估值只用于计算已选股票的盈亏。
 涨跌停指分钟 close 触及限价，不代表封单或一定无法成交；前收盘估算使用前交易日收盘价和板块规则。缺少原可算限价时，使用当日 09:30 精确 close 作开盘代理估算，注明开盘代理价；这不是真实开盘价或交易所限价，缺少该分钟价格仍为未确定。除权等特殊情形仍需正式限价数据。
 ETF 估算权重＝该笔 PCF 股数×信号价÷（信号 IOPV×ETF 份数），不是指数官方权重。</p>
-<p class="note">个股盈亏以信号时该股估值为基准：申购减去实际买入成本，赎回为实际卖出净额减基准，均含该股费用。
-本市场申购补券按配置的 T+2 日 14:30 尝试，未买入部分按期限日收盘估值；跨市场按申请后首个可成交分钟定价。
+<p class="note">个股价格影响以信号时该股估值为基准：申购为基准减买入或期限估值金额，赎回为卖出或期限估值金额减基准，不含交易税费。
+成交和期限估值按本轮已保存的实际处理时点分别列示。
 以下金额直接来自本轮已保存成交和估值，历史回测仍按当时执行规则；不以新规则追溯改写。
-部分成交的成交均价与剩余估值分别展示，未全部定价的盈亏留空。固定现金替代采用 PCF 固定金额差；
-未提交申赎后平仓的股票按实际买卖差额减费计算。
-这些是原回测盈亏的组成，不再次加到总利润，不把保证金退款当盈利，也不把整笔预估现金差额分摊给某只股票。定价不等于到账。</p>
+部分成交的成交均价与剩余估值分别展示，未全部定价的盈亏留空。固定现金替代沿用本轮信号估值与 PCF 实际固定金额；
+未提交申赎后平仓的股票按实际买卖价差计算，不含费用。
+这些是原回测盈亏的组成，不再次加到总利润，不把保证金退款当盈利，也不把整笔预估现金差额分摊给某只股票。
+入选股票的价格变化不等于涨跌停直接造成的损失。定价不等于到账。</p>
 {visibility_note}
-<p><a href="stock_limit_impact.csv">下载全部股票明细 CSV（含隐藏项）</a> · <a href="stock_limit_events.csv">下载触及事件 CSV</a> ·
-<a href="trade_limit_summary.csv">下载每笔交易检查表</a></p>
+<p><a href="stock_limit_impact.csv">下载全方向股票明细 CSV（含原始含费字段，纯价格影响见 gross_price_pnl）</a> · <a href="stock_limit_events.csv">下载全方向触及事件 CSV</a> ·
+<a href="trade_limit_summary.csv">下载全方向逐笔检查表</a></p>
 <style>#{table_id}{{width:100%;min-width:0;table-layout:fixed;font-size:12px}}
 #{table_id} th,#{table_id} td{{padding:8px 5px;white-space:normal;overflow-wrap:anywhere;vertical-align:top}}
 #{table_id} tfoot{{font-weight:bold;background:#eaf1f8}}</style>
 <table id="{table_id}"><thead><tr>'''
     columns = ("交易／发起时间", "方向", "股票／市场", "触及情况", "股数", "ETF 估算权重",
-               "信号时股价", "处理方式", "采用的定价方式", "实际成交均价", "未成交部分估值价", "个股盈亏（元，含费）", "ETF整篮成本影响（元，含费）", "每份ETF成本影响（元/份）", "占信号整篮估值比例")
+               "信号时股价", "处理方式", "采用的定价方式", "实际成交均价", "未成交部分估值价", "个股价格变动盈亏（元）", "ETF整篮价格成本影响（元）", "每份ETF成本影响（元/份，不含税费）", "占信号整篮估值比例")
     doc += "".join(f"<th>{c}</th>" for c in columns) + "</tr></thead><tbody>"
     for r in rows:
         kinds = r["limit_types"].replace("limit_up", "涨停").replace("limit_down", "跌停")
@@ -371,18 +385,18 @@ ETF 估算权重＝该笔 PCF 股数×信号价÷（信号 IOPV×ETF 份数）�
         values = [f"{r['trade_id']}\n{r['opened_at']}", "申购" if r["side"] == "CREATE" else "赎回",
             f"{r['symbol']}\n{r['security_name'] or ''}", f"{kinds}／{stages}／{source}",
             number(r["quantity"], 0), weight, number(r["signal_price"], 4), ROUTES[r["route"]], method, executed, valued,
-            "未参与交割" if r["route"] == "unapplied" else number(r["stock_pnl"]), number(r["etf_cost_impact"]),
+            "未参与交割" if r["route"] == "unapplied" else number(r["gross_price_pnl"]), number(r["etf_cost_impact"]),
             number(r["etf_cost_impact_per_share"], 8),
             "未确定" if r["etf_cost_impact_ratio"] is None else f"{decimal(r['etf_cost_impact_ratio']):.6%}"]
         doc += "<tr>" + "".join(f"<td>{cell(v)}</td>" for v in values) + "</tr>"
     if not rows and all_rows:
         doc += '<tr><td colspan="15">本表入选股票的已确定盈亏均仅来自税费，已隐藏；费用仍计入总盈亏。</td></tr>'
     elif not rows:
-        doc += '<tr><td colspan="15">未识别到买入时的涨跌停股票；数据不足的交易不能据此认定为无涨跌停。</td></tr>'
+        doc += '<tr><td colspan="15">未识别到入场时的申购涨停／赎回跌停股票；数据不足的交易不能据此认定为无相关触限。</td></tr>'
     doc += ('</tbody><tfoot><tr><td colspan="11">当前展示股票已知金额合计（跨交易每份金额及比例不相加）</td>'
-            f'<td>{total("stock_pnl", {"manager", "physical", "fixed", "unwound"})}</td>'
+            f'<td>{total("gross_price_pnl", {"manager", "physical", "fixed", "unwound"})}</td>'
             f'<td>{total("etf_cost_impact")}</td><td>—</td><td>—</td></tr></tfoot></table>')
-    doc += '<details><summary>每笔交易的检查结果（包括无事件及数据不足）</summary><table><thead><tr><th>交易编号</th><th>发起时间</th><th>方向</th><th>涨跌停股票数</th><th>代码</th><th>无法判断股票数</th></tr></thead><tbody>'
+    doc += '<details><summary>每笔交易的检查结果（包括无相关事件及数据不足）</summary><table><thead><tr><th>交易编号</th><th>发起时间</th><th>方向</th><th>申购涨停／赎回跌停股票数</th><th>代码</th><th>无法判断股票数</th></tr></thead><tbody>'
     for r in coverage:
         doc += '<tr>' + ''.join(f'<td>{cell(v)}</td>' for v in (r["trade_id"], r["opened_at"],
             "申购" if r["side"] == "CREATE" else "赎回", r["limit_stock_count"], r["limit_symbols"] or "—",

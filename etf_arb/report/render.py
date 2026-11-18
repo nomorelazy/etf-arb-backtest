@@ -99,6 +99,8 @@ def save_report(
     trade_rows: Sequence[dict] | None = None,
     financial_summary: dict | None = None,
     limit_impact: dict | None = None,
+    limit_value: dict | None = None,
+    limit_exposure: dict | None = None,
     signal_risk: dict | None = None,
     attribution_rows: Sequence[dict] | None = None,
 ) -> BacktestSummary:
@@ -173,6 +175,7 @@ def save_report(
     fig.savefig(chart_path, dpi=160, bbox_inches="tight")
     plt.close(fig)
     _save_html(summary, output / "report.html", chart_path.name,
+               limit_value=limit_value, limit_exposure=limit_exposure,
                trade_rows=trade_rows, financial_summary=financial_summary,
                attribution_rows=attribution_rows, limit_impact=limit_impact, signal_risk=signal_risk)
     if attribution_rows is not None:
@@ -184,10 +187,16 @@ def save_report(
     if signal_risk is not None:
         from etf_arb.report.signal_risk import save_signal_risk
         save_signal_risk(output, signal_risk)
+    if limit_value is not None:
+        from etf_arb.report.limit_value import save_limit_value
+        save_limit_value(output, limit_value)
+    if limit_exposure is not None:
+        from etf_arb.report.limit_exposure import save_limit_exposure
+        save_limit_exposure(output, limit_exposure)
     return summary
 
 
-def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None,
+def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_rows=None, financial_summary=None, limit_value=None, limit_exposure=None,
                attribution_rows=None, limit_impact=None, signal_risk=None) -> None:
     labels = {
         "total_return": "区间收益率",
@@ -268,12 +277,17 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
     if attribution_rows is not None:
         from etf_arb.report.attribution import attribution_html
         details += attribution_html(attribution_rows)
+    if limit_exposure is not None:
+        from etf_arb.report.limit_exposure import limit_exposure_html
+        details += limit_exposure_html(limit_exposure)
     if limit_impact is not None:
         from etf_arb.report.limit_impact import limit_impact_html
-        details += limit_impact_html(limit_impact)
+        details += ('<details><summary>发起时触限的个股价格影响（不含税费，含未延迟成交）</summary>'
+                    + limit_impact_html(limit_impact) + '</details>')
     if signal_risk is not None:
         from etf_arb.report.signal_risk import signal_risk_html
-        details += signal_risk_html(signal_risk)
+        details += ('<details><summary>信号时风险敞口与分类覆盖</summary>'
+                    + signal_risk_html(signal_risk) + '</details>')
     if trade_rows is not None:
         quality = ('<a href="../quality/summary.json">数据缺失检查</a>'
                    if (path.parent.parent / 'quality/summary.json').is_file()
@@ -281,6 +295,11 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
         details += ('<p><a href="ledger.html">逐笔全部现金、证券、成交及结算账目（可打印）</a> | '
                     + quality + ' | '
                     '<a href="../assumptions.json">本轮配置与假设</a></p>')
+    appendix_link = ""
+    if limit_value is not None:
+        from etf_arb.report.limit_value_html import LIMIT_VALUE_LINK, limit_value_html
+        details += limit_value_html(limit_value)
+        appendix_link = LIMIT_VALUE_LINK
     document = f"""<!doctype html>
 <html lang="zh-CN">
 <meta charset="utf-8">
@@ -294,8 +313,9 @@ th, td {{ border-bottom: 1px solid #ddd; padding: 10px 14px; text-align: left; }
 th {{ background: #f4f6f8; }} img {{ width: 100%; max-width:1100px; height: auto; }}
 .note {{ color: #555; line-height: 1.6; }}
 </style>
-<body class="{'wide-report' if attribution_rows is not None else ''}">
+<body class="{'wide-report' if attribution_rows is not None or limit_value is not None else ''}">
 <h1>ETF 申赎套利回测报告</h1>
+{appendix_link}
 <table><tbody>{rows}</tbody></table>
 <img src="{chart_name}" alt="累计 PnL 与回撤图">
 <p class="note">基于日频账户总权益和已平仓套利交易计算。最大回撤以正数表示回撤幅度；盈亏比为平均盈利除以平均亏损绝对值；未平仓交易不计入胜率和盈亏比。</p>

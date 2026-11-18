@@ -45,10 +45,12 @@ class RunnerConfig:
     settlement_business_days: tuple[date, ...] | None = None
     cash_payment_dates_path: Path | None = None
 
+    report_previous_closes_path: Path | None = None
+
     def __post_init__(self) -> None:
         engine = BacktestConfig(self.start_date, self.end_date, self.etf_codes)
         object.__setattr__(self, "etf_codes", engine.etf_codes)
-        for name in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "cash_payment_dates_path"):
+        for name in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "report_previous_closes_path", "cash_payment_dates_path"):
             value = getattr(self, name)
             if value is not None:
                 object.__setattr__(self, name, Path(value).expanduser().resolve())
@@ -113,7 +115,7 @@ class RunnerConfig:
             for key in ("start_date", "end_date", "settlement_end_date"):
                 if values.get(key) is not None:
                     values[key] = date.fromisoformat(values[key])
-            for key in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "cash_payment_dates_path"):
+            for key in ("pcf_root", "minute_root", "output_dir", "decisions_path", "rules_path", "report_previous_closes_path", "cash_payment_dates_path"):
                 if values.get(key) is not None:
                     source = Path(values[key]).expanduser()
                     values[key] = source if source.is_absolute() else config_path.parent / source
