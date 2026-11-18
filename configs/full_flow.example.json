@@ -17,7 +17,7 @@
     "premium_threshold": null,
     "quantity_units": 1,
     "max_trades_per_day": null,
-    "min_trade_interval_minutes": 60,
+    "min_trade_interval_minutes": 5,
     "blocked_trade_minutes": ["09:30"],
     "trading_sessions": [["09:35", "11:29"], ["13:03", "14:57"]],
     "cash_substitution_pricing_days": 2,

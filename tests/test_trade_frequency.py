@@ -11,9 +11,9 @@ class TradeFrequencyTests(unittest.TestCase):
     def test_rolling_interval_does_not_reset_on_clock_hour(self):
         rule = TradeFrequencyRule()
         previous = datetime(2025, 1, 2, 10, 59)
-        for minutes in (1, 30, 59):
+        for minutes in (1, 3, 4):
             self.assertFalse(rule.allows(previous + timedelta(minutes=minutes), last_started_at=previous, started_today=1))
-        self.assertTrue(rule.allows(previous + timedelta(minutes=60), last_started_at=previous, started_today=1))
+        self.assertTrue(rule.allows(previous + timedelta(minutes=5), last_started_at=previous, started_today=1))
         self.assertTrue(rule.allows(previous + timedelta(minutes=120), last_started_at=previous, started_today=5))
 
     def test_first_start_and_optional_daily_cap(self):
@@ -28,13 +28,13 @@ class TradeFrequencyTests(unittest.TestCase):
         simulator.trades.append(trade)
         simulator.started_by_day[previous.date()] = 1
         simulator.orders.extend([object()] * 500)
-        self.assertFalse(simulator.available(previous + timedelta(minutes=59)))
-        self.assertTrue(simulator.available(previous + timedelta(minutes=60)))
+        self.assertFalse(simulator.available(previous + timedelta(minutes=4)))
+        self.assertTrue(simulator.available(previous + timedelta(minutes=5)))
         self.assertTrue(simulator.available(previous + timedelta(hours=2)))
         trade.state = "CLOSED"
-        self.assertFalse(simulator.available(previous + timedelta(minutes=59)))
+        self.assertFalse(simulator.available(previous + timedelta(minutes=4)))
 
-    def test_signal_time_and_unsubmitted_entry_do_not_start_the_hour(self):
+    def test_signal_time_and_unsubmitted_entry_do_not_start_the_interval(self):
         simulator = ArbitrageSimulator(None, SimulationConfig())
         signal = datetime(2025,1,2,9,35)
         trade = SimpleNamespace(state="BUILD", applied_at=None, decision=SimpleNamespace(ts=signal))
@@ -42,9 +42,9 @@ class TradeFrequencyTests(unittest.TestCase):
         self.assertFalse(simulator.available(signal+timedelta(hours=2)))
         trade.applied_at = signal + timedelta(minutes=25)
         trade.state = "APPLIED"
-        self.assertFalse(simulator.available(signal + timedelta(minutes=60)))
-        self.assertFalse(simulator.available(trade.applied_at + timedelta(minutes=59)))
-        self.assertTrue(simulator.available(trade.applied_at + timedelta(minutes=60)))
+        self.assertFalse(simulator.available(signal + timedelta(minutes=26)))
+        self.assertFalse(simulator.available(trade.applied_at + timedelta(minutes=4)))
+        self.assertTrue(simulator.available(trade.applied_at + timedelta(minutes=5)))
 
     def test_invalid_frequency_settings_are_rejected(self):
         for value in (0, -1, True, 1.5):

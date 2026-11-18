@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 
 @dataclass(frozen=True)
 class TradeFrequencyRule:
-    min_interval_minutes: int = 60
+    min_interval_minutes: int = 5
     max_trades_per_day: int | None = None
 
     def __post_init__(self):

@@ -23,7 +23,7 @@ class RollingApplicationTests(unittest.TestCase):
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
         self.config = replace(self.fixture.config, clock_times=CLOCKS,
-            simulation=replace(self.fixture.config.simulation, fees=FeeRates(),
+            simulation=replace(self.fixture.config.simulation, fees=FeeRates(), min_trade_interval_minutes=60,
                 blocked_trade_minutes=('09:30',),
                 trading_sessions=(('09:35', '11:27'), ('13:00', '14:57')),
                 cash_substitution_lag=None, cash_difference_lag=None))

@@ -13,7 +13,7 @@ class SimulationConfig:
     premium_threshold: Decimal | None = None
     quantity_units: int = 1
     max_trades_per_day: int | None = None
-    min_trade_interval_minutes: int = 60
+    min_trade_interval_minutes: int = 5
     blocked_trade_minutes: tuple[str, ...] = ("09:30",)
     trading_sessions: tuple[tuple[str, str], ...] = (("09:35", "11:29"), ("13:03", "14:57"))
     cash_substitution_pricing_days: int = 2

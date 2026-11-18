@@ -231,15 +231,15 @@ class SignalTimeEntryTests(unittest.TestCase):
             self.assertEqual(runner.executor.account.holdings('T000001'), {})
 
     def test_interval_still_starts_at_application_not_the_earlier_buy(self):
-        clocks = (time(9, 30), time(9, 31), time(9, 32), time(10, 30), time(10, 31), time(10, 32), time(15))
+        clocks = (time(9, 30), time(9, 31), time(9, 32), time(9, 35), time(9, 36), time(9, 37), time(15))
         rows = [(datetime.combine(day, clock), symbol, price)
                 for day in fixtures.DAYS for clock in clocks
                 for symbol, price in (('159338.SZ', 4), ('000001.SZ', 1), ('600000.SH', 2))]
         config = replace(self.config, clock_times=clocks,
                          simulation=replace(self.settings, max_trades_per_day=None))
         runner, _ = self.run_model(rows, config)
-        self.assertEqual([t.decision.ts.time() for t in runner.executor.trades], [time(9, 30), time(10, 31)])
-        self.assertEqual([t.applied_at.time() for t in runner.executor.trades], [time(9, 31), time(10, 32)])
+        self.assertEqual([t.decision.ts.time() for t in runner.executor.trades], [time(9, 30), time(9, 36)])
+        self.assertEqual([t.applied_at.time() for t in runner.executor.trades], [time(9, 31), time(9, 37)])
 
     def test_explicit_false_retains_legacy_next_minute_entry(self):
         for side in (Side.CREATE, Side.REDEEM):
