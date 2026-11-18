@@ -29,6 +29,11 @@ from etf_arb.runner_config import load_rules
 
 ZERO = Decimal(0)
 SELECTION_BASIS = "signal_time_directional_risk"
+SCHEMA_VERSION = 2
+COMPONENT_SCOPE = "exclude_cross_market_cash_substitution"
+# Keep reporting compatible with Desktop variants without FULL_FLOW_ETFS.
+ETF_MARKETS = {"159338": "SZ", "159516": "SZ", "512760": "SH",
+               "512880": "SH", "515880": "SH"}
 CATEGORIES = ("limit", "suspension", "mandatory_cash", "total")
 LABELS = {"limit_up": "申购涨停", "limit_down": "赎回跌停",
           "suspension": "停牌", "mandatory_cash": "PCF必须现金替代"}
@@ -41,6 +46,7 @@ DETAIL_FIELDS = (
 )
 SUMMARY_FIELDS = (
     "trade_id", "opened_at", "side", "basket_value", "etf_shares", "component_count",
+    "etf_market", "excluded_cross_market_cash_count",
     *(f"{name}_{field}" for name in CATEGORIES for field in
       ("stock_count", "value", "weight", "known_value", "known_weight", "missing_value_count", "unknown_stock_count")),
     "coverage_complete", "estimated_limit_stock_count", "unknown_details",
@@ -101,6 +107,30 @@ def _setting(config, name, default=None):
     return config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
 
 
+def _etf_market(pcf, etf_symbol):
+    market = ETF_MARKETS.get(pcf.etf_code)
+    if market is None:
+        raise ValueError(f"Unsupported ETF market for signal risk: {pcf.etf_code}")
+    parts = etf_symbol.split(".")
+    if parts[0] != pcf.etf_code or (len(parts) > 1 and parts != [pcf.etf_code, market]):
+        raise ValueError(f"ETF market conflicts with PCF: {etf_symbol}/{pcf.etf_code}.{market}")
+    return market
+
+
+def is_current_signal_risk(data):
+    """Do not reuse all-market snapshots or relabel their derived totals."""
+    return (isinstance(data, dict) and data.get('schema_version') == SCHEMA_VERSION
+            and data.get('selection_basis') == SELECTION_BASIS
+            and data.get('mandatory_scope') == 'pcf_mandatory_only'
+            and data.get('component_scope') == COMPONENT_SCOPE
+            and isinstance(data.get('rows'), list) and isinstance(data.get('trades'), list))
+
+
+def _require_current_snapshot(data):
+    if not is_current_signal_risk(data):
+        raise ValueError('Incompatible signal risk snapshot; rebuild from signal-time inputs')
+
+
 def _security_rule(rules, symbol, code, day):
     for key in (symbol, code):
         try:
@@ -130,7 +160,8 @@ def _summary(rows, unknown, category, basket):
 
 def build_signal_risk(config, trades, signals, *, rules=None):
     """Build trade-time snapshots in one batched minute read per required month."""
-    data = dict(schema_version=1, selection_basis=SELECTION_BASIS,
+    data = dict(schema_version=SCHEMA_VERSION, selection_basis=SELECTION_BASIS,
+        component_scope=COMPONENT_SCOPE,
         mandatory_scope="pcf_mandatory_only", price_basis="exact_signal_minute_or_pcf_fixed_cash",
         weight_basis="signal_iopv_times_etf_shares", rows=[], trades=[])
     if not trades:
@@ -150,29 +181,39 @@ def build_signal_risk(config, trades, signals, *, rules=None):
         at, units = timestamp(trade["opened_at"]), int(trade["quantity_units"])
         if units <= 0 or trade["side"] not in {"CREATE", "REDEEM"}:
             raise ValueError("Risk report requires positive units and CREATE/REDEEM side")
-        code = (trade.get("etf_symbol") or _setting(config, "etf_codes")[0]).split(".")[0]
+        etf_symbol = trade.get("etf_symbol") or _setting(config, "etf_codes")[0]
+        code = etf_symbol.split(".")[0]
         key = code, at.date()
         if key not in cache:
             cache[key] = pcfs.get(*key)
         pcf = cache[key]
+        market = _etf_market(pcf, etf_symbol)
         components = {}
+        seen, excluded = set(), 0
         for component in pcf.components:
             if component.is_cash_placeholder:
                 continue
             try:
-                mandatory = _normalize_substitution_flag(component.substitution_flag) == SubstitutionKind.MANDATORY
+                substitution = _normalize_substitution_flag(component.substitution_flag)
+                mandatory = substitution == SubstitutionKind.MANDATORY
             except PricingDataError:
+                substitution = None
                 mandatory = None
             if component.quantity == 0 and mandatory is False:
                 continue
             symbol = component_symbol(component)
-            if symbol in components:
+            if symbol in seen:
                 raise ValueError(f"Duplicate PCF constituent: {code} {at.date()} {symbol}")
+            seen.add(symbol)
+            if (symbol.rsplit(".", 1)[-1] != market
+                    and substitution in {SubstitutionKind.ALLOWED, SubstitutionKind.MANDATORY}):
+                excluded += 1
+                continue
             components[symbol] = component, mandatory
             requests[at].add(symbol)
             if pcf.pre_trading_day and pcf.pre_trading_day < at.date():
                 requests[datetime.combine(pcf.pre_trading_day, time(15))].add(symbol)
-        contexts[tid] = pcf, components, at, units
+        contexts[tid] = pcf, components, at, units, market, excluded
     prices = RiskEventPrices(_setting(config, "minute_root"))
     prices.read(requests)
     data['quote_issue_count'] = len(prices.issues)
@@ -182,10 +223,11 @@ def build_signal_risk(config, trades, signals, *, rules=None):
     bounds_by_day = {}
     for trade in sorted(trades, key=lambda row: (timestamp(row["opened_at"]), row["trade_id"])):
         tid = trade["trade_id"]
-        pcf, components, at, units = contexts[tid]
+        pcf, components, at, units, market, excluded = contexts[tid]
         key = pcf.etf_code, at.date()
         if key not in bounds_by_day:
-            limits.on_day_open(pcf, rules, held_components=[item[0] for item in components.values()])
+            limits.on_day_open(pcf, rules, check_basket=False,
+                               held_components=[item[0] for item in components.values()])
             bounds_by_day[key] = dict(limits.bounds)
         limits.bounds = bounds_by_day[key]
         shares = decimal(trade.get("etf_shares"))
@@ -257,6 +299,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
             selected_rows.append(row)
         data["rows"].extend(selected_rows)
         summary = dict(trade_id=tid, opened_at=at, side=trade["side"], basket_value=basket,
+            etf_market=market, excluded_cross_market_cash_count=excluded,
             etf_shares=shares, component_count=len(components), estimated_limit_stock_count=estimated,
             unknown_details=";".join(details))
         for category in CATEGORIES:
@@ -268,6 +311,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
 
 def signal_risk_html(data, *, trade_id=None):
     """Render all rows without inner scrolling; percentages are never added across trades."""
+    _require_current_snapshot(data)
     trades = [row for row in data["trades"] if trade_id is None or row["trade_id"] == trade_id]
     rows = [row for row in data["rows"] if trade_id is None or row["trade_id"] == trade_id]
     def number(value):
@@ -287,9 +331,12 @@ def signal_risk_html(data, *, trade_id=None):
         return result
     unknown_trades = sum(not bool(row["coverage_complete"]) for row in trades)
     doc = '<section class="signal-risk"><h2>信号时风险敞口</h2>'
-    doc += ('<p>按发出套利信号的 t 分钟统计：申购涨停、赎回跌停、停牌及 PCF 标为必须现金替代的真实成分股。'
+    doc += ('<p>按 ETF 上市市场区分本市场与跨市场：排除跨市场允许／必须现金替代股票，保留本市场股票（含现金替代）。'
+            '159338、159516 的本市场为深市；512760、512880、515880 的本市场为沪市。'
+            '跨市场禁止替代或替代标志未知的股票不擅自按现金代理排除。'
+            '在此范围内，按发出套利信号的 t 分钟统计：申购涨停、赎回跌停、停牌及 PCF 标为必须现金替代的真实成分股。'
             '占比＝该股信号篮子估值÷（信号 IOPV×本笔 ETF 份数）。必须现金替代使用当日 PCF 固定申购金额作为统一比较基准，包括数量为零的固定现金行；'
-            '不计虚拟申赎现金汇总行，也不把跨市场允许替代股票自动计为必须替代。</p>'
+            '不计虚拟申赎现金汇总行。分母仍为整篮 ETF 信号估值，不因排除跨市场现金替代而缩小。</p>'
             '<p>三类可重叠，总敞口按股票去重；金额为按上述分类的信号时名义敞口，不是实时净风险、预计亏损或新增现金扣款。固定现金替代金额也不等同于尚未锁价的股价风险。'
             '信号缺价不取前一分钟或未来价格补值；缺停牌资料不等于未停牌。前收盘估算与 09:30 close 开盘代理估算均计入估算限价数量。'
             '开盘代理仅在缺少原可算限价时使用当日 09:30 精确 close；这不是真实开盘价或交易所限价。'
@@ -301,7 +348,7 @@ def signal_risk_html(data, *, trade_id=None):
     for row in trades:
         doc += f'<tr><td>{text(row["trade_id"])}<br>{text(row["opened_at"])}</td><td>{"申购" if row["side"] == "CREATE" else "赎回"}</td>'
         doc += ''.join(f'<td>{amount(row, category)}</td>' for category in CATEGORIES)
-        doc += f'<td>{row["total_stock_count"]} 只风险股 / {row["component_count"]} 只成分股<br>停牌状态缺失 {row["suspension_unknown_stock_count"]} 只<br>估算限价 {row["estimated_limit_stock_count"]} 只</td></tr>'
+        doc += f'<td>{row["total_stock_count"]} 只风险股 / {row["component_count"]} 只范围内成分股<br>已排除跨市场现金替代 {row["excluded_cross_market_cash_count"]} 只<br>停牌状态缺失 {row["suspension_unknown_stock_count"]} 只<br>估算限价 {row["estimated_limit_stock_count"]} 只</td></tr>'
     doc += '</tbody></table><h3>风险成分股明细</h3>'
     if not rows:
         return doc + '<p>未识别出符合上述条件的风险成分股；资料不完整时不代表敞口为零。</p></section>'
@@ -322,6 +369,7 @@ def signal_risk_html(data, *, trade_id=None):
 
 
 def save_signal_risk(output_dir, data):
+    _require_current_snapshot(data)
     output = Path(output_dir)
     output.mkdir(parents=True, exist_ok=True)
     (output / 'signal_risk.json').write_text(json.dumps(data, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
@@ -340,8 +388,5 @@ def save_signal_risk(output_dir, data):
 def load_signal_risk(path):
     """Only accept this exact signal-time definition; older attribution is not a substitute."""
     data = json.loads(Path(path).read_text(encoding='utf-8'))
-    if (data.get('schema_version') != 1 or data.get('selection_basis') != SELECTION_BASIS
-            or data.get('mandatory_scope') != 'pcf_mandatory_only'
-            or not isinstance(data.get('rows'), list) or not isinstance(data.get('trades'), list)):
-        raise ValueError('Incompatible signal risk snapshot; rebuild from signal-time inputs')
+    _require_current_snapshot(data)
     return data

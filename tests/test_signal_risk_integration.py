@@ -34,9 +34,14 @@ class SignalRiskIntegrationTests(unittest.TestCase):
         self.assertIs(build.call_args.kwargs['rules'], runner.resources.rules)
         run = self.fixture.config.output_dir
         data = json.loads((run / 'signal_risk.json').read_text(encoding='utf-8'))
+        self.assertEqual(data['schema_version'], 2)
         self.assertEqual(data['selection_basis'], 'signal_time_directional_risk')
+        self.assertEqual(data['component_scope'], 'exclude_cross_market_cash_substitution')
         self.assertEqual(len(data['trades']), summary['opened_count'])
-        self.assertTrue(data['rows'])  # Fixture includes two real fixed-cash constituents.
+        # The fixture has local and foreign fixed cash; only local risks remain.
+        self.assertEqual({row['symbol'] for row in data['rows']}, {'000002.SZ'})
+        self.assertTrue(all(row['etf_market'] == 'SZ' for row in data['trades']))
+        self.assertTrue(all(row['excluded_cross_market_cash_count'] == 2 for row in data['trades']))
         self.assert_rendered(run / 'report', data)
         original = {p: hashlib.sha256(p.read_bytes()).hexdigest()
                     for p in run.rglob('*') if p.is_file()}
@@ -58,6 +63,34 @@ class SignalRiskIntegrationTests(unittest.TestCase):
         self.assert_rendered(legacy_output, data)
         self.assertEqual(old_run, {p: hashlib.sha256(p.read_bytes()).hexdigest()
                                    for p in run.rglob('*') if p.is_file()})
+
+    def test_old_schema_and_wrong_scope_rebuild_without_changing_execution_files(self):
+        self.fixture.run_model()
+        run = self.fixture.config.output_dir
+        cache = run / 'signal_risk.json'
+        current = json.loads(cache.read_text(encoding='utf-8'))
+        for name, version, scope in (('v1', 1, None), ('wrong-scope', 2, 'all_constituents')):
+            with self.subTest(name=name):
+                old = json.loads(json.dumps(current))
+                old['schema_version'] = version
+                if scope is None:
+                    old.pop('component_scope')
+                else:
+                    old['component_scope'] = scope
+                # A plausible stale foreign constituent must be recomputed, never relabelled.
+                old['rows'][0]['symbol'] = '600001.SH'
+                old['rows'][0]['signal_value'] = '999999'
+                cache.write_text(json.dumps(old), encoding='utf-8')
+                original = {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                            for path in run.rglob('*') if path.is_file()}
+                output = self.fixture.root / f'rebuild-{name}'
+                with patch('etf_arb.report.signal_risk.build_signal_risk',
+                           wraps=build_signal_risk) as rebuild:
+                    rebuild_run_report(run, output)
+                rebuild.assert_called_once()
+                self.assert_rendered(output, current)
+                self.assertEqual(original, {path: hashlib.sha256(path.read_bytes()).hexdigest()
+                                           for path in run.rglob('*') if path.is_file()})
 
 
 if __name__ == '__main__':

@@ -105,16 +105,12 @@ def rebuild_run_report(run_dir, output_dir):
                         fills, fees, pricing, substitutions, settlements,
                         read_rows(run_dir / 'substitution_attempts.csv')))
     limit_impact = with_cost_metrics(limit_impact, trades)
-    from etf_arb.report.signal_risk import build_signal_risk
+    from etf_arb.report.signal_risk import build_signal_risk, is_current_signal_risk
     saved_risk_path = run_dir / "signal_risk.json"
     saved_risk = (json.loads(saved_risk_path.read_text(encoding="utf-8"))
                   if saved_risk_path.is_file() else {})
-    signal_risk = (saved_risk if saved_risk.get("schema_version") == 1
-                   and saved_risk.get("selection_basis") == "signal_time_directional_risk"
-                   and saved_risk.get("mandatory_scope") == "pcf_mandatory_only"
-                   and isinstance(saved_risk.get("rows"), list)
-                   and isinstance(saved_risk.get("trades"), list)
-                   else build_signal_risk(config, trades, read_rows(run_dir / "signals.csv")))
+    signal_risk = (saved_risk if is_current_signal_risk(saved_risk) else
+                   build_signal_risk(config, trades, read_rows(run_dir / "signals.csv")))
     closed = [ClosedTrade(t['trade_id'], decimal(t['net_pnl'])) for t in trades
               if t['state'] == 'CLOSED' and t.get('net_pnl') not in (None, '')]
     actual_net = sum((t.pnl for t in closed), Decimal(0))
