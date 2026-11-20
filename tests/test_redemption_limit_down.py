@@ -9,6 +9,7 @@ from decimal import Decimal
 
 import test_full_flow as fixtures
 import test_market_split_substitution as market
+from etf_arb.rules import SecurityTradingRule
 
 
 class RedemptionLimitDownTests(unittest.TestCase):
@@ -71,6 +72,16 @@ class RedemptionLimitDownTests(unittest.TestCase):
         mark, = sim.substitution_pricing
         self.assertEqual((mark["symbol"], mark["ts"], mark["quantity"]),
                          ("600000.SH", datetime.combine(deadline, time(15)), 100))
+
+    def test_existing_dated_suspension_rule_also_retries_on_first_stock_minute(self):
+        day, resumed, end = fixtures.DAYS
+        self.fixture.rules.add(SecurityTradingRule("000001.SZ", day, day, False, False, is_suspended=True))
+        self.fixture.rules.add(SecurityTradingRule("000001.SZ", resumed, end, True, True))
+        config = replace(self.config, clock_times=tuple(t for t in self.config.clock_times if t != time(9, 30)))
+        runner, _ = self.run_model(self.fixture.market_rows(3.2, 3.1), config)
+        fill, = [row for row in runner.executor.fills if row["symbol"] == "000001.SZ"]
+        self.assertEqual((fill["ts"], fill["basis"]),
+                         (datetime.combine(resumed, time(9, 30)), "first_tradable_close_after_suspension"))
 
     def test_unknown_after_block_does_not_release_and_deadline_only_values_proxy(self):
         day1, day2, day3 = fixtures.DAYS

@@ -18,6 +18,8 @@ def security_trade_block(repo, symbol, at, side, policy):
                 return "missing_dated_security_rule"
     if rule is None:
         return "missing_security_rule" if policy == "require" else ""
+    if rule.is_suspended:
+        return "stock_suspended"
     if not rule.is_trading_time(at.time()) or not (
         rule.can_buy() if side == "BUY" else rule.can_sell()
     ):
