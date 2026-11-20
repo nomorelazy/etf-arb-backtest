@@ -343,7 +343,7 @@ def signal_risk_html(data, *, trade_id=None):
             '缺少该分钟价格仍为未确定；触及估算限价不代表盘口封单。</p>')
     doc += f'<p>共 {len(trades)} 笔，{unknown_trades} 笔敞口覆盖或估值未完整；下表“已识别”数值仅为已知部分。百分比不跨交易合计。</p>'
     doc += '<table style="width:100%;table-layout:fixed;overflow-wrap:anywhere"><thead><tr>'
-    doc += ''.join(f'<th>{heading}</th>' for heading in ('交易／信号时间', '方向', '涨跌停敞口／占比', '停牌敞口／占比', '必须现金替代／占比', '去重总敞口／占比', '股票数／识别覆盖'))
+    doc += ''.join(f'<th>{heading}</th>' for heading in ('交易／信号时间', '方向', '本市场口径涨跌停敞口／占比', '停牌敞口／占比', '必须现金替代／占比', '去重总敞口／占比', '股票数／识别覆盖'))
     doc += '</tr></thead><tbody>'
     for row in trades:
         doc += f'<tr><td>{text(row["trade_id"])}<br>{text(row["opened_at"])}</td><td>{"申购" if row["side"] == "CREATE" else "赎回"}</td>'

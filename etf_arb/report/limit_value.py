@@ -1,6 +1,7 @@
 """Signal-minute stock market values and weights for the standard ETF report."""
 
 from collections import Counter, defaultdict
+import csv
 from datetime import datetime, time
 from decimal import Decimal
 import json
@@ -34,7 +35,7 @@ def _ratio(value, denominator):
 def _metrics(hits, unknown_count, basket):
     if unknown_count is None:
         return dict.fromkeys(METRICS) | {"complete": False, "weight_complete": False}
-    known = sum((s["value"] for s in hits if s["value"] is not None), ZERO)
+    known = sum((decimal(s["value"]) for s in hits if s["value"] is not None), ZERO)
     missing = sum(s["value"] is None for s in hits)
     complete = not missing and not unknown_count
     pct = _ratio(known, basket)
@@ -144,6 +145,53 @@ def _snapshot(row, basket, limits, prices):
                zero_quantity_rows_excluded=sum(not c.is_cash_placeholder and c.quantity == 0 for c in pcf.components))
 
 
+def _directional_scope(row):
+    """Derive both markets from the saved signal-minute evidence, including cash proxies."""
+    target = "up" if row["side"] == "CREATE" else "down"
+    hits, unknowns = row["hit_stocks"], row["unknown_stocks"]
+    for stock in [*hits, *unknowns]:
+        kind = None
+        try:
+            kind = _normalize_substitution_flag(stock.get("substitution_flag"))
+        except PricingDataError:
+            pass
+        if kind is SubstitutionKind.MANDATORY:
+            route = "固定现金替代"
+        elif kind is SubstitutionKind.ALLOWED:
+            route = "本市场允许替代" if stock["market"] == row["etf_market"] else "跨市场现金代理"
+        elif kind is SubstitutionKind.FORBIDDEN:
+            route = "实物交付"
+        else:
+            route = "清单标志待核"
+        stock["pcf_route"] = route
+        stock["directional"] = stock["limit_side"] == target if stock["limit_side"] != "unknown" else None
+    unknown_count = row["all"]["unknown_count"]
+    known_hit_count = row["all"][target]["known_count"]
+    eligible = [s for s in hits if s["directional"]]
+    complete_evidence = (unknown_count == len(unknowns) and known_hit_count == len(eligible)
+                         and all(s["market"] in ("SZ", "SH") for s in [*eligible, *unknowns]))
+    groups = {"limit_side": target}
+    for market in ("SZ", "SH", "total"):
+        selected = [s for s in eligible if market == "total" or s["market"] == market]
+        unknown = sum(market == "total" or s["market"] == market for s in unknowns) if complete_evidence else None
+        groups[market] = dict(_metrics(selected, unknown, decimal(row["basket_value"])), unknown_count=unknown)
+    row["directional_by_market"] = groups
+
+
+def _upgrade_snapshot(data):
+    if data.get("schema_version") == 2:
+        return data
+    if data.get("schema_version") != 1:
+        raise ValueError("Unrecognized limit-value snapshot")
+    rows = []
+    for saved in data["rows"]:
+        row = dict(saved, hit_stocks=[dict(s) for s in saved["hit_stocks"]],
+                   unknown_stocks=[dict(s) for s in saved["unknown_stocks"]])
+        _directional_scope(row)
+        rows.append(row)
+    return dict(data, schema_version=2, rows=rows)
+
+
 def _missing_snapshot(row):
     missing = _metrics([], None, row["basket_value"])
     cover = _coverage(None, None)
@@ -242,6 +290,7 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
                 _snapshot(row, (scope, refs, pcf), limits, prices)
     sources, resource_counts = Counter(), Counter()
     for row in rows:
+        _directional_scope(row)
         sources.update(row["all"]["limit_source_counts"])
         resource_counts.update(row["all"]["reference_source_counts"])
     summary = dict(trade_count=len(rows), all_scope_complete_trades=sum(r["all"]["total"]["complete"] for r in rows),
@@ -250,12 +299,13 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
                    missing_pcf_trades=sum(r["coverage_issue"] == "missing_pcf" for r in rows),
                    stock_observations=sum(sources.values()), source_counts=dict(sources),
                    reference_source_counts=dict(resource_counts))
-    return dict(schema_version=1, selection_basis="signal_minute_limit_stock_values",
+    return dict(schema_version=2, selection_basis="signal_minute_limit_stock_values",
                 rows=rows, summary=summary, prior_closes_sha256=feed_sha256)
 
 
 def save_limit_value(output, data):
     """Atomically replace the run's snapshot, including every trade and identification gap."""
+    data = _upgrade_snapshot(data)
     path = Path(output) / "limit_value.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, delete=False) as handle:
@@ -266,11 +316,32 @@ def save_limit_value(output, data):
         os.replace(temp, path)
     finally:
         temp.unlink(missing_ok=True)
+    group_fields = ("value", "weight", "known_value", "known_weight", "known_count", "unknown_count",
+                    "complete", "weight_complete")
+    prefixes = ("sz_directional", "sh_directional", "total_directional", "local_directional")
+    identifiers = ("trade_id", "opened_at", "side", "etf_shares", "iopv", "basket_value")
+    fields = [*identifiers, "limit_side", *(f"{p}_{f}" for p in prefixes for f in group_fields)]
+    with NamedTemporaryFile(dir=path.parent, mode="w", encoding="utf-8-sig", newline="", delete=False) as handle:
+        csv_temp = Path(handle.name)
+    try:
+        with csv_temp.open("w", encoding="utf-8-sig", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fields)
+            writer.writeheader()
+            for row in data["rows"]:
+                groups = row["directional_by_market"]
+                record = {key: row[key] for key in identifiers}
+                record["limit_side"] = groups["limit_side"]
+                for prefix, group in zip(prefixes, (groups["SZ"], groups["SH"], groups["total"], row["local_directional"])):
+                    record.update({f"{prefix}_{field}": group[field] for field in group_fields})
+                writer.writerow(record)
+        os.replace(csv_temp, path.with_suffix(".csv"))
+    finally:
+        csv_temp.unlink(missing_ok=True)
     return path
 
 
 def _same_trades(data, config, trades, signals):
-    if (not isinstance(data, dict) or data.get("schema_version") != 1
+    if (not isinstance(data, dict) or data.get("schema_version") not in (1, 2)
             or data.get("selection_basis") != "signal_minute_limit_stock_values"
             or not isinstance(data.get("rows"), list) or not isinstance(data.get("summary"), dict)
             or len(trades) != len(data["rows"])):
@@ -304,7 +375,7 @@ def limit_value_from_run(run_dir, config, trades, signals):
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
             if _same_trades(data, config, trades, signals) and prior_closes_match(data, config):
-                return data
+                return _upgrade_snapshot(data)
         except (ValueError, TypeError, KeyError, ArithmeticError):
             continue
     return build_limit_value(config, trades, signals)

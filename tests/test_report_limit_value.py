@@ -1,3 +1,5 @@
+import csv
+import json
 from datetime import date, datetime, timedelta
 from decimal import Decimal as D
 from pathlib import Path
@@ -49,6 +51,19 @@ class SignalLimitValueTests(unittest.TestCase):
         self.assertEqual(create["all"]["total"]["weight"], D(2712)/4000)
         self.assertEqual(create["local_directional"]["value"], 2352)
         self.assertEqual(redeem["local_directional"]["value"], 0)
+        for row, sz, sh in ((create, 2352, 0), (redeem, 0, 360)):
+            groups = row["directional_by_market"]
+            self.assertEqual(groups["SZ"]["value"], sz)
+            self.assertEqual(groups["SH"]["value"], sh)
+            self.assertEqual(groups["total"]["value"], sz + sh)
+            self.assertEqual(groups["total"]["weight"], D(sz + sh) / row["basket_value"])
+        self.assertEqual([s["pcf_route"] for s in redeem["hit_stocks"]], ["固定现金替代", "跨市场现金代理"])
+        self.assertEqual([s["directional"] for s in redeem["hit_stocks"]], [False, True])
+        save_limit_value(self.root, result)
+        with (self.root / "limit_value.csv").open(encoding="utf-8-sig", newline="") as f:
+            exported = list(csv.DictReader(f))
+        self.assertEqual(D(exported[1]["sh_directional_weight"]), D(360)/4000)
+        self.assertEqual(D(exported[1]["local_directional_weight"]), 0)
         self.assertEqual(create["all"]["component_count"], 2)
         self.assertEqual(create["local_directional"]["component_count"], 1)
         self.assertEqual(create["hit_stocks"][0]["reference_source"], "verified_historical_previous_close_feed")
@@ -66,6 +81,13 @@ class SignalLimitValueTests(unittest.TestCase):
         self.assertEqual(row["all"]["unknown_count"], 1)
         self.assertEqual(row["unknown_stocks"][0]["reason"], "missing_exact_close")
         self.assertIsNone(row["unknown_stocks"][0]["price"])
+        self.assertFalse(row["directional_by_market"]["SZ"]["complete"])
+        self.assertEqual(row["directional_by_market"]["SZ"]["unknown_count"], 1)
+        self.assertIsNone(row["directional_by_market"]["total"]["value"])
+        self.assertIsNone(row["directional_by_market"]["SH"]["weight"])
+        self.assertEqual(row["directional_by_market"]["SH"]["value"], 440)
+        self.assertEqual(row["directional_by_market"]["total"]["known_value"], 440)
+
 
     def test_official_bounds_precede_prior_and_open_proxy_never_leaks_to_earlier_signal(self):
         bounds = self.root / "official.csv"
@@ -85,6 +107,24 @@ class SignalLimitValueTests(unittest.TestCase):
         self.assertEqual(second["hit_stocks"][0]["reference_source"], "same_day_0930_close_proxy")
         self.assertEqual(second["all"]["up"]["value"], 2400)
 
+    def test_offline_v1_snapshot_upgrades_directional_evidence_from_saved_stocks(self):
+        self.prices.values.update({("002245.SZ", self.t): D(11), ("002245.SZ", self.prior): D(10),
+                                   ("600000.SH", self.t): D(11), ("600000.SH", self.prior): D(10)})
+        data = self.build()
+        old = json.loads(json.dumps(data, default=str))
+        old["schema_version"] = 1
+        del old["rows"][0]["directional_by_market"]
+        for stock in old["rows"][0]["hit_stocks"]:
+            del stock["directional"], stock["pcf_route"]
+        path = self.root / "limit_value.json"
+        path.write_text(json.dumps(old), encoding="utf-8")
+        offline = dict(self.config, minute_root=self.root / "offline", pcf_root=self.root / "offline")
+        with patch("etf_arb.report.limit_value.build_limit_value", side_effect=AssertionError("offline rebuild")):
+            restored = limit_value_from_run(self.root, offline, [self.trade], [dict(ts=self.t, iopv=2)])
+        self.assertEqual(restored["schema_version"], 2)
+        self.assertEqual(restored["rows"][0]["directional_by_market"], data["rows"][0]["directional_by_market"])
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), old)
+
     def test_missing_pcf_keeps_basket_without_assuming_empty_constituents(self):
         with patch("etf_arb.report.limit_value.FilePCFRepository.get", side_effect=FileNotFoundError):
             row, = build_limit_value(self.config, [self.trade], [dict(ts=self.t, iopv=2)])["rows"]
@@ -92,6 +132,9 @@ class SignalLimitValueTests(unittest.TestCase):
         self.assertEqual(row["coverage_issue"], "missing_pcf")
         self.assertIsNone(row["all"]["total"]["known_value"])
         self.assertIsNone(row["all"]["component_count"])
+        self.assertIsNone(row["directional_by_market"]["total"]["known_value"])
+        self.assertIsNone(row["directional_by_market"]["SZ"]["unknown_count"])
+
 
     def test_saved_snapshot_offline_and_changed_hash_or_trade_rebuild(self):
         signals = [dict(ts=self.t, iopv="2")]
