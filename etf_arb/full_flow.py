@@ -51,6 +51,7 @@ def make_full_runner(config, *, rules=None):
         period = resources.portfolio.summarize_pnl(config.start_date, config.end_date)
         summary = dict(
             etf_code=etf_code,
+            adjusted_references_sha256=limits.adjusted.sha256,
             settle_estimated_cash_at_application=settings.settle_estimated_cash_at_application,
             premium_threshold=str(settings.premium_threshold),
             blocked_trade_minutes=list(settings.blocked_trade_minutes),

@@ -107,6 +107,25 @@ class SignalLimitValueTests(unittest.TestCase):
         self.assertEqual(second["hit_stocks"][0]["reference_source"], "same_day_0930_close_proxy")
         self.assertEqual(second["all"]["up"]["value"], 2400)
 
+    def test_official_no_limit_beats_effective_reference_and_expired_rows_are_ignored(self):
+        adjusted = self.root / "adjusted_reference_prices.csv"
+        adjusted.write_text("date,symbol,reference_price,source_url\n"
+                            "2025-01-02,002245.SZ,10,https://source.example/official\n"
+                            "2024-12-31,600000.SH,50,https://source.example/stale\n")
+        official = self.root / "bounds.csv"
+        official.write_text("date,symbol,upper_limit,lower_limit,no_limit\n2025-01-02,002245.SZ,,,true\n")
+        self.config["daily_price_limits_path"] = official
+        self.prices.values.update({("002245.SZ", self.t): D(11), ("600000.SH", self.t): D(11),
+                                   ("600000.SH", self.prior): D(10)})
+        data = self.build()
+        self.assertEqual([stock["symbol"] for stock in data["rows"][0]["hit_stocks"]], ["600000.SH"])
+        self.assertEqual(data["rows"][0]["hit_stocks"][0]["reference_source"], "local_exact_previous_close")
+        save_limit_value(self.root, data)
+        adjusted.write_text(adjusted.read_text().replace("002245.SZ,10", "002245.SZ,11"))
+        with patch("etf_arb.report.limit_value.build_limit_value", return_value={"rebuilt": True}):
+            self.assertEqual(limit_value_from_run(self.root, self.config, [self.trade], [dict(ts=self.t, iopv="2")]),
+                             {"rebuilt": True})
+
     def test_offline_v1_snapshot_upgrades_directional_evidence_from_saved_stocks(self):
         self.prices.values.update({("002245.SZ", self.t): D(11), ("002245.SZ", self.prior): D(10),
                                    ("600000.SH", self.t): D(11), ("600000.SH", self.prior): D(10)})

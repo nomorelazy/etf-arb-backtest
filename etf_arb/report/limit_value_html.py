@@ -10,6 +10,7 @@ LIMIT_VALUE_LINK = '<p class="lv-top"><a href="#limit-values">查看信号时涨
 
 _LABELS = {
     "provided": "已提供的当日限价",
+    "adjusted_reference_price": "按当日除权除息参考价推算",
     "provided_no_limit": "明确无价格限制",
     "no_limit": "明确无价格限制",
     "estimated": "前收推算",
@@ -166,7 +167,7 @@ def limit_value_html(data):
 <details class="lv-method"><summary>查看计算公式与限价依据</summary>
 <p>个股市值 = 当日 PCF 股数 × 本笔申赎单位数 × 信号分钟收盘价。全篮统计有正股数的成分股，同一只股票每笔只算一次。</p>
 <p>本笔 ETF 篮子参考净值 = 信号 IOPV × 本笔 ETF 份额。深市、沪市及合计共用这一分母，各笔按自己的信号时点计算。</p>
-<p>优先使用当日已提供的有效限价，缺限价时用 PCF 上一交易日的本地收盘价推算。本地缺失时用同日同股的经核验补充前收。两者均缺时使用当日 09:30 分钟 close 作为开盘代理价，逐股明细列出实际采用的依据。</p>
+<p>优先使用当日已提供的有效限价，缺限价时，先用该证券当日已核实的除权除息参考价，再用 PCF 上一交易日的本地收盘价推算。本地缺失时用同日同股的经核验补充前收。两者均缺时使用当日 09:30 分钟 close 作为开盘代理价，逐股明细列出实际采用的依据。</p>
 <p>缺少精确行情、限价依据不足或价格超出限价区间时，列出已识别部分与待核股数。零股数固定现金项没有股票市值。本节衡量信号当刻的名义敞口。实际买卖是否受阻，请查成交与延迟敞口流水。固定替代股按清单固定金额交收。</p></details>
 <p class="lv-note">全篮完整识别 {complete} 笔，另有 {len(rows) - complete} 笔待核。表内已识别部分可展开核对。</p>
 <div class="lv-tools"><label>交易方向 <select id="lv-side"><option value="all">全部方向</option><option value="CREATE">申购</option><option value="REDEEM">赎回</option></select></label>

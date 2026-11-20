@@ -96,6 +96,29 @@ class CreationBasketTests(unittest.TestCase):
                                  ("000001.SZ", "verified_historical_previous_close_feed"))
                 self.assertEqual(sim.account.cash - config.starting_cash, D(summary["final_net_pnl"]))
 
+    def test_ex_rights_day_reference_overrides_actual_previous_close_for_orders_and_report(self):
+        feed = self.fixture.market / "adjusted_reference_prices.csv"
+        feed.write_text("date,symbol,reference_price,source_url\n"
+                        "2025-01-02,000001.SZ,0.91,https://example.test/ex-rights\n")
+        settings = replace(self.fixture.config.simulation, entry_at_signal_time=True,
+                           market_split_execution=True, max_trades_per_day=1)
+        config = replace(self.fixture.config, simulation=settings)
+        at = datetime.combine(fixtures.DAYS[2], time(14, 30))
+        rows = [(ts, code, 1.05 if code == "000001.SZ" and ts == at else price)
+                for ts, code, price in self.fixture.market_rows()]
+        rows.append((datetime(2024, 12, 31, 15), "000001.SZ", 1.45))
+        runner, summary = self.fixture.run_model(rows, config)
+        sim = runner.executor
+        self.assertEqual(summary["settled_count"], 1)
+        self.assertEqual(sim.creation_substitutions[0]["reason"], "limit_up:adjusted_reference_price")
+        fills = [r for r in sim.fills if r["symbol"] == "000001.SZ"]
+        self.assertEqual([(r["ts"], r["price"]) for r in fills], [(at, D("1.05"))])
+        snapshot = json.loads((config.output_dir / "limit_value.json").read_text(encoding="utf-8"))
+        evidence = snapshot["rows"][0]["hit_stocks"][0]
+        self.assertEqual((evidence["reference_price"], evidence["reference_source"], evidence["reference_url"]),
+                         ("0.91", "adjusted_reference_price", "https://example.test/ex-rights"))
+        self.assertEqual(sim.account.cash - config.starting_cash, D(summary["final_net_pnl"]))
+
     def test_cross_market_creation_waits_for_first_buyable_proxy_minute(self):
         config = self.fixture.config
         bounds = self.fixture.root / "limits.csv"

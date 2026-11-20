@@ -220,6 +220,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
     data['quote_issue_count'] = len(prices.issues)
     limits = ReportPriceLimits.from_config(prices, config, event_prices=prices)
     data["prior_closes_sha256"] = limits.previous.sha256
+    data["adjusted_references_sha256"] = limits.adjusted.sha256
     bounds_by_day = {}
     for trade in sorted(trades, key=lambda row: (timestamp(row["opened_at"]), row["trade_id"])):
         tid = trade["trade_id"]
@@ -249,7 +250,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
                 if previous_issue:
                     status = 'unknown:reference_' + previous_issue
             kind, source = status.split(":", 1) if status else ("normal", limits.bounds.get(symbol, (None, "unknown"))[1])
-            if source in {"estimated", "estimated_open_0930_proxy"}:
+            if source in {"estimated", "estimated_open_0930_proxy", "adjusted_reference_price"}:
                 estimated += 1
             relevant = "limit_up" if trade["side"] == "CREATE" else "limit_down"
             if kind == relevant:
@@ -360,6 +361,7 @@ def signal_risk_html(data, *, trade_id=None):
         basis = {'pcf_creation_fixed_cash': 'PCF固定金额',
                  'exact_signal_minute_close': '信号分钟价格×股数'}.get(row['valuation_basis'], '替代标志未确定')
         source = {'provided': '提供的限价', 'estimated': '前收盘估算',
+                  'adjusted_reference_price': '当日除权除息参考价推算',
                   'estimated_open_0930_proxy': '09:30 close 开盘代理估算'}.get(row['limit_source'], '未确定')
         doc += (f'<tr><td>{text(row["trade_id"])}<br>{text(row["opened_at"])}</td>'
             f'<td>{text(row["symbol"])} {text(row["security_name"])}<br>{"申购" if row["side"] == "CREATE" else "赎回"}</td>'

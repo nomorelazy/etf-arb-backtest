@@ -9,6 +9,7 @@ import json
 from pathlib import Path
 from urllib.parse import quote
 
+from etf_arb.data.adjusted_references import AdjustedReferences
 from etf_arb.data.pcf import FilePCFRepository
 from etf_arb.data.snapshot import component_symbol
 from etf_arb.report.limit_impact import EventPrices
@@ -301,6 +302,7 @@ def build_limit_exposure(config, trades, orders, fills, fees, pricing, blocks, s
         observed_through = datetime.fromisoformat(str(day)).replace(hour=15)
     horizon = timestamp(observed_through)
     data = dict(schema_version=2, selection_basis='recorded_directional_limit_delay',
+                adjusted_references_sha256=AdjustedReferences.from_config(config).sha256,
                 chronological_order='opened_at_then_first_block_then_symbol',
                 records_available=records_available, observed_through=horizon, rows=[],
                 duration_basis='elapsed_clock_minutes_including_lunch_overnight_and_scheduled_wait')

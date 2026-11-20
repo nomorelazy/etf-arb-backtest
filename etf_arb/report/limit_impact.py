@@ -229,6 +229,7 @@ def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), su
     prices.read(requests)
     limit_filter = ReportPriceLimits.from_config(prices, config, event_prices=prices)
     data["prior_closes_sha256"] = limit_filter.previous.sha256
+    data["adjusted_references_sha256"] = limit_filter.adjusted.sha256
     active = None
     hits, unknown, counts = defaultdict(list), defaultdict(set), defaultdict(int)
     # One bounds calculation per opening date/ETF, using that date's PCF.
@@ -371,6 +372,7 @@ ETF 估算权重＝该笔 PCF 股数×信号价÷（信号 IOPV×ETF 份数）�
         stages = "／".join(STAGES.get(s, s) for s in r["limit_stages"].split(";"))
         source = "；".join({"estimated": "前收盘估算",
             "estimated_open_0930_proxy": "09:30 close 开盘代理估算",
+            "adjusted_reference_price": "当日除权除息参考价推算",
             "provided": "提供的限价"}.get(value, value) for value in r["limit_sources"].split(";"))
         weight = "未确定" if r["etf_weight"] in (None, "") else f"{decimal(r['etf_weight']):.4%}"
         method = "／".join(METHODS.get(m, m) for m in r["pricing_method"].split(";") if m) or "未定价"

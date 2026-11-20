@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 from urllib.parse import urlsplit
 
+from etf_arb.data.adjusted_references import AdjustedReferences
 from etf_arb.data.minute_close import MinuteCloseBar
 from decimal import Decimal
 
@@ -28,6 +29,14 @@ def report_prior_path(config, override=None):
     return None
 
 
+def adjusted_references_match(data, config):
+    for key in ("minute_root", "pcf_root"):
+        root = _setting(config, key)
+        if root and not Path(root).is_dir():
+            return True
+    return data.get("adjusted_references_sha256") == AdjustedReferences.from_config(config).sha256
+
+
 def prior_closes_match(data, config):
     """A detached run may use its snapshot; an available changed feed invalidates it."""
     if not isinstance(data, dict):
@@ -36,6 +45,8 @@ def prior_closes_match(data, config):
         root = _setting(config, key)
         if root and not Path(root).is_dir():
             return True
+    if data.get("adjusted_references_sha256") != AdjustedReferences.from_config(config).sha256:
+        return False
     path = report_prior_path(config)
     if path and path.is_file():
         return data.get("prior_closes_sha256") == hashlib.sha256(path.read_bytes()).hexdigest()

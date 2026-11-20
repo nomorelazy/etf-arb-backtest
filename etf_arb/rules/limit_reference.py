@@ -7,13 +7,16 @@ must not expose bounds based on it before 09:30 on the effective day.
 
 from datetime import datetime, time
 
+from etf_arb.data.adjusted_references import ADJUSTED_REFERENCE_SOURCE
+from etf_arb.data.minute_close import MinuteCloseBar
+
 
 OPENING_PROXY_TIME = time(9, 30)
 OPENING_PROXY_SOURCE = "estimated_open_0930_proxy"
 
 
-def load_limit_references(pcf, symbols, previous, opening):
-    """Batch-load exact prior closes, then exact same-day 09:30 missing values.
+def load_limit_references(pcf, symbols, previous, opening, adjusted=None):
+    """Use sourced effective-day references, then exact prior closes and the 09:30 fallback.
 
 Official limit prices are resolved by the caller before passing its remaining
 symbols. Missing opening bars stay unknown; no nearest-bar or cross-day lookup
@@ -23,12 +26,21 @@ is permitted. Board, ST, corporate-action and tick rules remain caller-owned.
     if not symbols:
         return {}
     day = pcf.effective_date
+    result = {}
+    if adjusted is not None:
+        for symbol in symbols:
+            price = adjusted.limits.get((day, symbol))
+            if price is not None:
+                bar = MinuteCloseBar(datetime.combine(day, time.min), symbol, price)
+                result[symbol] = bar, ADJUSTED_REFERENCE_SOURCE
+        symbols = [symbol for symbol in symbols if symbol not in result]
+        if not symbols:
+            return result
     prior = pcf.pre_trading_day
     prior_at = None
     if prior is not None and prior < day:
         prior_at = datetime.combine(prior, time(15))
         previous.load(prior, symbols, at=prior_at.time())
-    result = {}
     missing = []
     for symbol in symbols:
         bar = previous.get(symbol, prior_at, exact=True) if prior_at else None

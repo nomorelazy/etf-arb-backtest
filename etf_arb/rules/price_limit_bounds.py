@@ -6,6 +6,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 from pathlib import Path
 
+from etf_arb.data.adjusted_references import ADJUSTED_REFERENCE_SOURCE, AdjustedReferences
 from etf_arb.data.prior_closes import PriorCloses, report_prior_path
 from etf_arb.data.snapshot import DailyCloseCache, component_symbol
 from etf_arb.rules.a_share import AShareBoard, a_share_price_limit_rate
@@ -63,10 +64,11 @@ class StockPriceLimits:
         bounds_path = setting("daily_price_limits_path")
         return cls(prices, setting("minute_root"), Path(bounds_path) if bounds_path else None,
                    prior_closes_path=report_prior_path(config, prior_closes_path),
-                   event_prices=event_prices)
+                   event_prices=event_prices, adjusted=AdjustedReferences.from_config(config))
 
-    def __init__(self, prices, minute_root, bounds_path=None, *, prior_closes_path=None, event_prices=None):
+    def __init__(self, prices, minute_root, bounds_path=None, *, prior_closes_path=None, event_prices=None, adjusted=None):
         self.prices = prices
+        self.adjusted = adjusted if adjusted is not None else AdjustedReferences(minute_root)
         previous = event_prices if event_prices is not None else DailyCloseCache(minute_root)
         self.previous = PriorCloses(previous, prior_closes_path)
         self.opening = event_prices if event_prices is not None else DailyCloseCache(minute_root)
@@ -85,7 +87,7 @@ class StockPriceLimits:
         self.bounds = {symbol: (self.provided[day, symbol], "provided")
                        for symbol in components if (day, symbol) in self.provided}
         estimated_symbols = components.keys() - self.bounds.keys()
-        references = load_limit_references(pcf, estimated_symbols, self.previous, self.opening)
+        references = load_limit_references(pcf, estimated_symbols, self.previous, self.opening, self.adjusted)
         for symbol in sorted(estimated_symbols):
             reference, source = references[symbol]
             if reference is None:
@@ -110,9 +112,12 @@ class StockPriceLimits:
                 except RuleNotFoundError:
                     continue
             name = (component.security_name or "").upper().lstrip()
-            if name.startswith(("N", "C", "XD", "XR", "DR")):
+            ex_rights = name.startswith(("XD", "XR", "DR"))
+            if name.startswith(("N", "C")) or (ex_rights and source != ADJUSTED_REFERENCE_SOURCE):
                 self.bounds[symbol] = (None, "needs_official_bounds")
                 continue
+            if ex_rights:
+                name = name[2:].lstrip()
             rate = a_share_price_limit_rate(
                 board, day, is_st=rule.is_st if rule else name.startswith(("ST", "*ST", "SST", "S*ST")),
                 is_suspended=bool(rule and rule.is_suspended),

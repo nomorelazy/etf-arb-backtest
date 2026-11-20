@@ -9,6 +9,7 @@ import os
 from tempfile import NamedTemporaryFile
 from pathlib import Path
 
+from etf_arb.data.adjusted_references import ADJUSTED_REFERENCE_SOURCE
 from etf_arb.data.pcf import FilePCFRepository
 from etf_arb.data.snapshot import component_symbol
 from etf_arb.pricing.errors import PricingDataError
@@ -71,7 +72,12 @@ def _constituents(pcf, market):
     return result
 
 
-def _reference(prices, previous, pcf, symbol, source):
+def _reference(prices, limits, pcf, symbol, source):
+    previous = limits.previous
+    if source == ADJUSTED_REFERENCE_SOURCE:
+        key = pcf.effective_date, symbol
+        return dict(reference_at=pcf.effective_date.isoformat(), reference_price=limits.adjusted.limits[key],
+                    reference_source=source, reference_url=limits.adjusted.urls[key])
     if source == "estimated":
         at = datetime.combine(pcf.pre_trading_day, time(15))
         bar = previous.get(symbol, at, exact=True)
@@ -267,7 +273,7 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
             if pcf.pre_trading_day and pcf.pre_trading_day < at.date():
                 requests[datetime.combine(pcf.pre_trading_day, time(15))].update(scope)
 
-    feed_sha256 = None
+    feed_sha256 = adjusted_sha256 = None
     if any(days.values()):
         minute_root = Path(_setting(config, "minute_root"))
         if rules is None:
@@ -277,14 +283,14 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
             prices = RiskEventPrices(minute_root)
         prices.read(requests)
         limits = ReportPriceLimits.from_config(prices, config, event_prices=prices, prior_closes_path=prior_closes_path)
-        previous = limits.previous
-        feed_sha256 = previous.sha256
+        feed_sha256 = limits.previous.sha256
+        adjusted_sha256 = limits.adjusted.sha256
         for day in days.values():
             if day is None:
                 continue
             pcf, market, scope, trades_today = day
             limits.on_day_open(pcf, rules)
-            refs = {symbol: _reference(prices, previous, pcf, symbol, source)
+            refs = {symbol: _reference(prices, limits, pcf, symbol, source)
                     for symbol, (_, source) in limits.bounds.items()}
             for row in trades_today:
                 _snapshot(row, (scope, refs, pcf), limits, prices)
@@ -300,7 +306,8 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
                    stock_observations=sum(sources.values()), source_counts=dict(sources),
                    reference_source_counts=dict(resource_counts))
     return dict(schema_version=2, selection_basis="signal_minute_limit_stock_values",
-                rows=rows, summary=summary, prior_closes_sha256=feed_sha256)
+                rows=rows, summary=summary, prior_closes_sha256=feed_sha256,
+                adjusted_references_sha256=adjusted_sha256)
 
 
 def save_limit_value(output, data):
