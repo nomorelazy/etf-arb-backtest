@@ -1,4 +1,5 @@
 import csv
+import json
 from dataclasses import replace
 from datetime import datetime, time
 from decimal import Decimal as D
@@ -57,6 +58,56 @@ class CreationBasketTests(unittest.TestCase):
         self.assertIn("security_rule_blocked", blocked[0]["component_reasons"])
         with (self.fixture.config.output_dir / "signals.csv").open(encoding="utf-8-sig", newline="") as handle:
             self.assertTrue(any(row["blocked_components"] == "000001.SZ" for row in csv.DictReader(handle)))
+
+    def test_supplemental_prior_blocks_entry_and_drives_reported_settlement(self):
+        feed = self.fixture.market / "report_prior_closes.csv"
+        feed.write_text("previous_date,symbol,close,source_url\n"
+                        "2024-12-31,000001.SZ,0.91,https://example.test/prior\n", encoding="utf-8")
+        settings = replace(self.fixture.config.simulation, entry_at_signal_time=True,
+                           market_split_execution=True, max_trades_per_day=1)
+        config = replace(self.fixture.config, simulation=settings)
+        at = datetime.combine(fixtures.DAYS[2], time(14, 30))
+        for price, method, value in ((1.05, "manager_scheduled_close_proxy", "1.05"),
+                                         (1.10, "unfilled_quantity_at_deadline_close", "1.03")):
+            with self.subTest(method=method):
+                config = replace(config, output_dir=self.fixture.root / method)
+                deadline = at.replace(hour=15, minute=0)
+                rows = [(ts, code, price if code == "000001.SZ" and ts == at else
+                         1.03 if code == "000001.SZ" and ts == deadline else p)
+                        for ts, code, p in self.fixture.market_rows()]
+                runner, summary = self.fixture.run_model(rows, config)
+                sim = runner.executor
+                self.assertEqual(summary["settled_count"], 1)
+                self.assertEqual(sim.creation_substitutions[0]["reason"], "limit_up:estimated")
+                fills = [r for r in sim.fills if r["symbol"] == "000001.SZ"]
+                self.assertFalse(any(r["purpose"] == "ENTRY" for r in fills))
+                if price == 1.05:
+                    self.assertEqual([(r["ts"], r["price"]) for r in fills], [(at, D(value))])
+                else:
+                    self.assertEqual(fills, [])
+                    self.assertEqual(sim.substitution_pricing[0]["price"], D(value))
+                with (config.output_dir / "stock_limit_impact.csv").open(encoding="utf-8-sig") as stream:
+                    stock = next(r for r in csv.DictReader(stream) if r["symbol"] == "000001.SZ")
+                self.assertEqual((stock["limit_types"], stock["pricing_method"]), ("limit_up", method))
+                self.assertEqual(D(stock["stock_pnl"]), (D("1") - D(value)) * 100)
+                snapshot = json.loads((config.output_dir / "limit_value.json").read_text(encoding="utf-8"))
+                hit = snapshot["rows"][0]["hit_stocks"][0]
+                self.assertEqual((hit["symbol"], hit["reference_source"]),
+                                 ("000001.SZ", "verified_historical_previous_close_feed"))
+                self.assertEqual(sim.account.cash - config.starting_cash, D(summary["final_net_pnl"]))
+
+    def test_cross_market_creation_waits_for_first_buyable_proxy_minute(self):
+        config = self.fixture.config
+        bounds = self.fixture.root / "limits.csv"
+        bounds.write_text("date,symbol,upper_limit,lower_limit\n2025-01-02,600000.SH,2.20,1.80\n")
+        config = replace(config, daily_price_limits_path=bounds, simulation=replace(config.simulation,
+                         entry_at_signal_time=True, market_split_execution=True, max_trades_per_day=1))
+        rows = [(ts, code, 2.20 if ts.time() == time(9, 31) and code == "600000.SH" else price)
+                for ts, code, price in self.fixture.market_rows()]
+        runner, _ = self.fixture.run_model(rows, config)
+        fills = [r for r in runner.executor.fills if r["symbol"] == "600000.SH"]
+        self.assertEqual([(r["ts"], r["price"]) for r in fills],
+                         [(datetime.combine(fixtures.DAYS[0], time(9, 32)), D(2))])
 
     def test_forbidden_but_buyable_keeps_physical_basket_and_pnl(self):
         self.component(SubstituteFlag="0")

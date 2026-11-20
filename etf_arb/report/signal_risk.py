@@ -21,7 +21,6 @@ from etf_arb.pricing.iopv import (SubstitutionKind, _normalize_substitution_flag
                                 fixed_substitution_amount)
 from etf_arb.report.limit_impact import EventPrices
 from etf_arb.report.price_limit_bounds import ReportPriceLimits
-from etf_arb.report.prior_closes import PriorCloses, report_prior_path
 from etf_arb.report.stock_cost import decimal, timestamp
 from etf_arb.rules import InMemoryRuleRepository
 from etf_arb.rules.errors import RuleNotFoundError
@@ -212,15 +211,14 @@ def build_signal_risk(config, trades, signals, *, rules=None):
                 continue
             components[symbol] = component, mandatory
             requests[at].add(symbol)
+            requests[datetime.combine(at.date(), time(9, 30))].add(symbol)
             if pcf.pre_trading_day and pcf.pre_trading_day < at.date():
                 requests[datetime.combine(pcf.pre_trading_day, time(15))].add(symbol)
         contexts[tid] = pcf, components, at, units, market, excluded
     prices = RiskEventPrices(_setting(config, "minute_root"))
     prices.read(requests)
     data['quote_issue_count'] = len(prices.issues)
-    bounds_path = _setting(config, "daily_price_limits_path")
-    limits = ReportPriceLimits(prices, _setting(config, "minute_root"), Path(bounds_path) if bounds_path else None)
-    limits.previous = PriorCloses(prices, report_prior_path(config))
+    limits = ReportPriceLimits.from_config(prices, config, event_prices=prices)
     data["prior_closes_sha256"] = limits.previous.sha256
     bounds_by_day = {}
     for trade in sorted(trades, key=lambda row: (timestamp(row["opened_at"]), row["trade_id"])):

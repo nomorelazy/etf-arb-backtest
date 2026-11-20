@@ -15,10 +15,11 @@ from etf_arb.rules import TradingTimeRule
 
 
 class PremiumDiscountSource:
-    def __init__(self, prices, settings, available):
+    def __init__(self, prices, settings, available, *, limits=None):
         if settings.premium_threshold is None:
             raise ValueError("Set simulation.premium_threshold or --premium-threshold explicitly before running signals")
         self.prices, self.settings, self.available = prices, settings, available
+        self.limits = limits
         self.rows = []
         self.fee_model = TradeFeeModel(settings.fees)
         self.trading_times = TradingTimeRule(settings.blocked_trade_minutes, settings.trading_sessions)
@@ -74,7 +75,7 @@ class PremiumDiscountSource:
         basket = None
         if side is Side.CREATE:
             basket = check_creation_basket(pcf, self.prices, context.resources.rules, now,
-                                           self.settings.security_rule_policy)
+                                           self.settings.security_rule_policy, limits=self.limits)
             row["cash_substituted_components"] = ";".join(basket.cash_substitutions)
             if basket.blocked or basket.data_errors:
                 row["blocked_components"] = ";".join(basket.blocked | basket.data_errors)

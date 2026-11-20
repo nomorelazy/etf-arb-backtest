@@ -13,7 +13,7 @@ from etf_arb.data.snapshot import component_symbol
 from etf_arb.pricing.errors import PricingDataError
 from etf_arb.pricing.iopv import SubstitutionKind, _normalize_substitution_flag
 from etf_arb.report.price_limit_bounds import ReportPriceLimits
-from etf_arb.report.prior_closes import PriorCloses, prior_closes_match, report_prior_path
+from etf_arb.report.prior_closes import prior_closes_match
 from etf_arb.report.signal_risk import RiskEventPrices, _etf_market, _setting
 from etf_arb.report.stock_cost import decimal, timestamp
 from etf_arb.rules import InMemoryRuleRepository
@@ -222,18 +222,15 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
     feed_sha256 = None
     if any(days.values()):
         minute_root = Path(_setting(config, "minute_root"))
-        feed = report_prior_path(config, prior_closes_path)
         if rules is None:
             path = _setting(config, "rules_path")
             rules = load_rules(path) if path else InMemoryRuleRepository()
         if prices is None:
             prices = RiskEventPrices(minute_root)
         prices.read(requests)
-        bounds_path = _setting(config, "daily_price_limits_path")
-        limits = ReportPriceLimits(prices, minute_root, Path(bounds_path) if bounds_path else None)
-        previous = PriorCloses(prices, feed)
+        limits = ReportPriceLimits.from_config(prices, config, event_prices=prices, prior_closes_path=prior_closes_path)
+        previous = limits.previous
         feed_sha256 = previous.sha256
-        limits.previous, limits.opening = previous, prices
         for day in days.values():
             if day is None:
                 continue

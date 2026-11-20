@@ -17,7 +17,6 @@ import pyarrow.dataset as ds
 
 from etf_arb.data.minute_close import MinuteCloseBar, MinuteCloseConflictError
 from etf_arb.data.pcf import FilePCFRepository
-from etf_arb.report.prior_closes import PriorCloses, report_prior_path
 from etf_arb.data.snapshot import component_symbol
 from etf_arb.domain import Side
 from etf_arb.execution.plan import build_plan
@@ -223,13 +222,12 @@ def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), su
         code = contexts[tid][0]
         event_pcf = pcf_for(code, at.date())
         requests[at].add(symbol)
+        requests[datetime.combine(at.date(), time(9, 30))].add(symbol)
         if event_pcf.pre_trading_day and event_pcf.pre_trading_day < at.date():
             requests[datetime.combine(event_pcf.pre_trading_day, time(15))].add(symbol)
     prices = EventPrices(setting("minute_root"))
     prices.read(requests)
-    limit_filter = ReportPriceLimits(prices, setting("minute_root"),
-        Path(setting("daily_price_limits_path")) if setting("daily_price_limits_path") else None)
-    limit_filter.previous = PriorCloses(prices, report_prior_path(config))
+    limit_filter = ReportPriceLimits.from_config(prices, config, event_prices=prices)
     data["prior_closes_sha256"] = limit_filter.previous.sha256
     active = None
     hits, unknown, counts = defaultdict(list), defaultdict(set), defaultdict(int)

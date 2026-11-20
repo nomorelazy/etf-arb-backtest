@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from etf_arb.data.snapshot import DailyCloseCache
+from etf_arb.rules.price_limit_bounds import StockPriceLimits
 from etf_arb.decision.premium import PremiumDiscountSource
 from etf_arb.execution.simulator import ArbitrageSimulator
 from etf_arb.report.render import save_report
@@ -36,8 +37,9 @@ def make_full_runner(config, *, rules=None):
         raise RunnerConfigError("Full-flow runner requires mode=execute and simulation settings")
     prices = DailyCloseCache(config.minute_root)
     etf_code, = config.etf_codes
-    executor = ArbitrageSimulator(prices, settings, etf_code=etf_code)
-    source = PremiumDiscountSource(prices, settings, executor.available)
+    limits = StockPriceLimits.from_config(prices, config)
+    executor = ArbitrageSimulator(prices, settings, etf_code=etf_code, limits=limits)
+    source = PremiumDiscountSource(prices, settings, executor.available, limits=limits)
 
     def report(result, resources):
         output = config.output_dir

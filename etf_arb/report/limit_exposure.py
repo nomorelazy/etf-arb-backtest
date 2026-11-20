@@ -270,9 +270,7 @@ def _initial_substitution_blocks(config, trades, orders, substitutions, rules, *
             requests[datetime.combine(pcf.pre_trading_day, time(15))].add(row['symbol'])
     prices = EventPrices(_setting(config, 'minute_root'))
     prices.read(requests)
-    path = _setting(config, 'daily_price_limits_path')
-    limits = ReportPriceLimits(prices, _setting(config, 'minute_root'), Path(path) if path else None)
-    limits.previous = limits.opening = prices
+    limits = ReportPriceLimits.from_config(prices, config, event_prices=prices)
     result = []
     for row in candidates:
         trade, order = by_trade[row['trade_id']], order_map[row['trade_id'], row['symbol']]

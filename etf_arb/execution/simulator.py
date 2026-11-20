@@ -72,8 +72,9 @@ class SimTrade:
 
 
 class ArbitrageSimulator:
-    def __init__(self, prices, settings, *, etf_code="159338"):
+    def __init__(self, prices, settings, *, etf_code="159338", limits=None):
         self.prices, self.settings = prices, settings
+        self.limits = limits
         self.etf_symbol = FULL_FLOW_ETFS[etf_code]
         self.proxy_market = "SZ" if self.etf_symbol.endswith(".SH") else "SH"
         self.fee_model = TradeFeeModel(settings.fees)
@@ -123,7 +124,8 @@ class ArbitrageSimulator:
     def on_day_open(self, context):
         if self.account is None:
             config = context.resources.config
-            self.redemption_limits = StockPriceLimits(self.prices, config.minute_root, config.daily_price_limits_path)
+            if self.limits is None:
+                self.limits = StockPriceLimits.from_config(self.prices, config)
             self.account = CashAccount(config.starting_cash, context.resources.portfolio)
             self.payment_dates = load_payment_dates(context.resources.config.cash_payment_dates_path)
             from datetime import timedelta
@@ -136,18 +138,18 @@ class ArbitrageSimulator:
                 symbols.add(order.symbol)
         symbols.update(symbol for (_, symbol), q in self.account.positions.items() if q)
         self.prices.load(context.now.date(), symbols)
-        # A pending sell can outlive its original PCF, including past the signal horizon.
+        # An unfilled order can outlive its original PCF, including past the signal horizon.
         held_components = []
         for trade in self.trades:
-            if trade.decision.side is Side.REDEEM and trade.state == "APPLIED":
-                pending = {o.symbol for o in self._orders(trade) if o.remaining and o.side == "SELL"}
+            if trade.state in {"BUILD", "APPLIED"}:
+                pending = {o.symbol for o in self._orders(trade) if o.remaining and o.symbol != self.etf_symbol}
                 if pending:
                     held_components.extend(c for c in trade.pcf.components
                                            if not c.is_cash_placeholder and component_symbol(c) in pending)
         pcf, = context.pcfs.values()
-        self.redemption_limits.on_day_open(pcf, context.resources.rules,
-                                          check_basket=context.now.date() <= context.resources.config.end_date,
-                                          held_components=held_components)
+        self.limits.on_day_open(pcf, context.resources.rules,
+                                check_basket=context.now.date() <= context.resources.config.end_date,
+                                held_components=held_components)
         for trade in self.trades:
             if trade.applied_at:
                 for leg in trade.legs:
@@ -171,8 +173,11 @@ class ArbitrageSimulator:
             return "blocked_trade_minute"
         elif not self.trading_times.allows(now.time()):
             return "outside_trading_sessions"
-        return security_trade_block(context.resources.rules, order.symbol, now, order.side,
-                                    self.settings.security_rule_policy)
+        block = security_trade_block(context.resources.rules, order.symbol, now, order.side,
+                                     self.settings.security_rule_policy)
+        if not block and order.side == "BUY" and order.symbol != self.etf_symbol:
+            return self.limits.buy_block(order.symbol, now, already_blocked=order.awaiting_limit_release)
+        return block
 
     def handle(self, decision, context):
         pcf = context.pcfs[decision.etf_code]
@@ -192,7 +197,7 @@ class ArbitrageSimulator:
         basket = None
         if decision.side is Side.CREATE:
             basket = check_creation_basket(pcf, self.prices, context.resources.rules, context.now,
-                                           self.settings.security_rule_policy)
+                                           self.settings.security_rule_policy, limits=self.limits)
             if basket.blocked or basket.data_errors:
                 kind = ("unbuyable_and_no_cash_substitution" if basket.blocked
                         else "missing_cash_substitution_data")
@@ -294,9 +299,11 @@ class ArbitrageSimulator:
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
+            if block and block.startswith("limit_up:"):
+                order.awaiting_limit_release = True
             return
         if trade.decision.side is Side.REDEEM and order.side == "SELL":
-            status = self.redemption_limits.status(order.symbol, context.now)
+            status = self.limits.status(order.symbol, context.now)
             if status and status.startswith("limit_down:"):
                 order.awaiting_limit_release = True
                 order.last_block = status

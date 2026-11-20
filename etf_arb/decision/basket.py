@@ -16,7 +16,7 @@ class CreationBasketCheck:
     data_errors: dict[str, str] = field(default_factory=dict)
 
 
-def check_creation_basket(pcf, prices, rules, now, policy):
+def check_creation_basket(pcf, prices, rules, now, policy, *, limits=None):
     """Use only currently known rules/quotes, never future fill availability.
 
     Optional domestic substitution deposits use the user's research formula:
@@ -41,6 +41,8 @@ def check_creation_basket(pcf, prices, rules, now, policy):
         block = security_trade_block(rules, symbol, now, "BUY", policy)
         bar = prices.get(symbol, now, exact=True)
         block = block or ("missing_exact_bar" if bar is None else "")
+        if not block and limits is not None:
+            block = limits.buy_block(symbol, now)
         if not block:
             continue
         if kind is SubstitutionKind.FORBIDDEN:

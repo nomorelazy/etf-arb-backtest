@@ -1,9 +1,12 @@
 """Daily price-limit bounds for order execution and reporting."""
 
 import csv
-from datetime import date, datetime, time
+from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
+from pathlib import Path
+
+from etf_arb.data.prior_closes import PriorCloses, report_prior_path
 from etf_arb.data.snapshot import DailyCloseCache, component_symbol
 from etf_arb.rules.a_share import AShareBoard, a_share_price_limit_rate
 from etf_arb.rules.errors import RuleNotFoundError
@@ -54,10 +57,19 @@ def estimate_bounds(reference, up_rate, down_rate, tick):
 
 
 class StockPriceLimits:
-    def __init__(self, prices, minute_root, bounds_path=None):
+    @classmethod
+    def from_config(cls, prices, config, *, event_prices=None, prior_closes_path=None):
+        setting = config.get if isinstance(config, dict) else lambda key: getattr(config, key, None)
+        bounds_path = setting("daily_price_limits_path")
+        return cls(prices, setting("minute_root"), Path(bounds_path) if bounds_path else None,
+                   prior_closes_path=report_prior_path(config, prior_closes_path),
+                   event_prices=event_prices)
+
+    def __init__(self, prices, minute_root, bounds_path=None, *, prior_closes_path=None, event_prices=None):
         self.prices = prices
-        self.previous = DailyCloseCache(minute_root)
-        self.opening = DailyCloseCache(minute_root)
+        previous = event_prices if event_prices is not None else DailyCloseCache(minute_root)
+        self.previous = PriorCloses(previous, prior_closes_path)
+        self.opening = event_prices if event_prices is not None else DailyCloseCache(minute_root)
         self.provided = load_daily_bounds(bounds_path)
         self.bounds = {}
 
@@ -114,6 +126,12 @@ class StockPriceLimits:
                 continue
             tick = rule.tick_size if rule and rule.tick_size is not None else STOCK_TICK
             self.bounds[symbol] = (estimate_bounds(reference.close, up, down, tick), source)
+
+    def buy_block(self, symbol, now, *, already_blocked=False):
+        status = self.status(symbol, now)
+        if status and (status.startswith("limit_up:") or (already_blocked and status.startswith("unknown:"))):
+            return status
+        return ""
 
     def status(self, symbol, now):
         bounds, source = self.bounds.get(symbol, (None, "missing_bounds"))

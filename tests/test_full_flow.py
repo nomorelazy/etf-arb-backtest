@@ -207,7 +207,7 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(runner.executor.trades[0].applied_at.time(), time(9, 32))
 
     def test_future_entry_price_jump_does_not_borrow_reserved_cash(self):
-        rows = [(ts, code, 1.1 if code == "000001.SZ" and ts.time() > time(9, 30) else price)
+        rows = [(ts, code, 1.09 if code == "000001.SZ" and ts.time() > time(9, 30) else price)
                 for ts, code, price in self.market_rows()]
         write_market(self.market, rows)
         runner = make_full_runner(replace(self.config, starting_cash=D("383")), rules=self.rules)
