@@ -44,6 +44,7 @@ class SimOrder:
     next_minute_attempted_at: datetime | None = None
     last_cross_market_attempted_at: datetime | None = None
     awaiting_limit_release: bool = False
+    deadline_price: Decimal | None = None
 
     @property
     def last_sh_attempted_at(self):
@@ -551,6 +552,9 @@ class ArbitrageSimulator:
                 if order.fee:
                     result += order.fee if trade.decision.side is Side.CREATE else -order.fee
             if required > filled:
+                if order is not None and order.deadline_price is not None:
+                    result += (required - filled) * order.deadline_price
+                    continue
                 bar = self.prices.get(symbol, now)
                 if bar:
                     self.marks[symbol] = bar.close
@@ -609,34 +613,33 @@ class ArbitrageSimulator:
             # The deadline callback may precede the queued 15:00 retry. Give
             # that inclusive last minute a chance before valuing unfilled stock.
             self._attempt_cross_market_substitution(trade, context, schedule_next=False)
-        outstanding = [order for order in self._orders(trade, "MANAGER") if order.remaining]
-        prices = {}
+        orders = self._orders(trade, "MANAGER")
+        outstanding = [order for order in orders if order.remaining]
+        at_close = datetime.combine(context.now.date(), time(15))
+        prices = {order.order_id: self.prices.get(order.symbol, at_close, exact=True) for order in outstanding}
+        missing = any(bar is None for bar in prices.values())
+        if missing:
+            trade.reason = "missing_substitution_deadline_close"
+            if trade.decision.side is Side.CREATE:
+                return
         for order in outstanding:
-            at_close = datetime.combine(context.now.date(), time(15))
-            bar = self.prices.get(order.symbol, at_close, exact=True)
+            bar = prices[order.order_id]
             if bar is None:
-                trade.reason = "missing_substitution_deadline_close"
-                return  # Never replace a missing T+2 close with a future price.
-            prices[order.order_id] = bar.close
-        fee_sign = 1 if trade.decision.side is Side.CREATE else -1
-        value = trade.plan.manager_fixed + sum(
-            (o.value for o in self._orders(trade, "MANAGER")), ZERO)
-        for order in self._orders(trade, "MANAGER"):
-            if order.fee:
-                value += fee_sign * order.fee
-        for order in outstanding:
-            quantity, price = order.remaining, prices[order.order_id]
-            value += quantity * price
+                continue
+            order.deadline_price = bar.close
             self.substitution_pricing.append(dict(trade_id=trade.trade_id, symbol=order.symbol,
-                quantity=quantity, price=price, ts=datetime.combine(context.now.date(), time(15)),
+                quantity=order.remaining, price=bar.close, ts=at_close,
                 basis="unfilled_quantity_at_deadline_close"))
             order.cancelled = True  # Stop only the proxy order; this is not an investor fill.
             order.last_block = "valued_at_pricing_deadline_close"
+        if missing:
+            return
+        value = self._manager_value(trade, at_close)
         sub.final = (trade.plan.substitution_deposit - value if trade.decision.side is Side.CREATE
                      else value + trade.plan.domestic_fixed)
         sub.estimate = sub.final
         sub.known_on, sub.priced_at = context.now.date(), context.now
-        sub.pricing_basis = ("filled_proxy_values_plus_deadline_close" if outstanding
+        sub.pricing_basis = ("filled_proxy_values_plus_deadline_close" if any(o.deadline_price is not None for o in orders)
                              else "completed_manager_close_proxy")
         if sub.payment_at is None and self.settings.cash_substitution_lag is not None:
             sub.due = trading_day_after(context.resources.config.trading_days, trade.applied_at.date(),

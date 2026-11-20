@@ -97,6 +97,38 @@ class RedemptionLimitDownTests(unittest.TestCase):
                                  '600000.SH': (self.entry, Decimal('2.20'))})
         self.assertFalse(runner.executor.redemption_sell_blocks)
 
+    def test_missing_deadline_bar_keeps_only_its_own_proxy_unpriced(self):
+        stocks = ('600000.SH', '600100.SH')
+        config = self.bounds([(day, symbol, '2.20', '1.80', 0)
+                              for day in fixtures.DAYS for symbol in stocks])
+        for path in (self.fixture.pcf / '159338').glob('*.xml'):
+            tree = ET.parse(path)
+            components = tree.getroot().find('Components')
+            extra = ET.SubElement(components, 'Component')
+            for tag, value in [('UnderlyingSecurityID', '600100'), ('UnderlyingSecurityIDSource', '101'),
+                               ('ComponentShare', '10'), ('SubstituteFlag', '1')]:
+                ET.SubElement(extra, tag).text = value
+            tree.write(path, encoding='utf-8')
+        deadline = datetime.combine(fixtures.DAYS[-1], time(15))
+        rows = []
+        for at, symbol, price in self.fixture.market_rows(3.2, 3.1):
+            if symbol == stocks[0]:
+                price = 1.80 if at >= self.entry else price
+                if at != deadline:
+                    rows.append((at, stocks[1], price))
+            rows.append((at, symbol, price))
+        runner, _ = self.run_model(rows, replace(config, quality_check=False))
+        sim = runner.executor
+        self.assertEqual([(r['symbol'], r['quantity'], r['price']) for r in sim.substitution_pricing],
+                         [(stocks[0], 100, Decimal('1.80'))])
+        self.assertFalse(any(f['purpose'] == 'MANAGER' for f in sim.fee_rows))
+        orders = {o.symbol: o for o in sim.orders}
+        self.assertEqual(orders[stocks[0]].deadline_price, Decimal('1.80'))
+        self.assertEqual(orders[stocks[1]].remaining, 10)
+        cash = next(leg for leg in sim.trades[0].legs if leg.kind == 'cash_substitution')
+        self.assertIsNone(cash.final)
+        self.assertFalse(cash.paid)
+
     def test_legacy_scheduled_proxy_retries_a_limit_block_before_deadline(self):
         scheduled = self.scheduled
         config = self.bounds([(scheduled.date(), '600000.SH', '2.2', '1.80', 0)])
