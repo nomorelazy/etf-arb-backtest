@@ -207,3 +207,11 @@
 行情根目录下的 adjusted_reference_prices.csv 按 date,symbol,reference_price,source_url 提供可在开市前确定的价格，也可使用 adjusted_reference_prices_path 指定文件。有效交易所日限价可覆盖该资料。输出注明来源；参考资料变化时按新资料重建信号触板快照，已保存的旧成交流水不会随报告重建而改变。
 
 生成历史参考表时，先运行 `python scripts/collect_exchange_prices.py --config CONFIG.json --audit-dir reports/reference_audit --etf 159338`，再运行 `python scripts/compare_and_merge_references.py --config CONFIG.json --audit-dir reports/reference_audit --etf 159338 --merge`。可并列传入多只 ETF。采集使用交易所按日期发布的原始 prevClose 字段。核对脚本保留缺日、非连续交易等例外清单，写入行情根目录。运行回测时没有网络依赖。
+
+## 2026-11-20 停牌证券的申赎与现金替代
+
+以可核查的整日停牌公告限制股票实际买卖。行情根目录中的 stock_suspensions.csv 按 symbol,start_date,end_date,source_url 保存两端均含的停牌区间，复牌日排除；可配置 stock_suspensions_path。行情供应商填充的分钟价可用作研究估值，不能证明发生股票成交。申赎资格仍依当天 PCF、申赎方向、持仓、现金及既有约束确定。159338 申赎遇固定替代按清单收付，深市允许替代可用于申购，深市允许替代的赎回收到实股，沪市允许替代须走代理买卖与现金退补。现金腿、实股持仓、真实模拟成交与期限估值分别记账。复牌后，本市场收到的实股在首个允许卖出的股票分钟检查成交。
+
+本轮维持用户既有的定时研究模型。允许替代按配置的交易所交易日历定价。国泰 159338 招募说明书按个股正常交易日计算两个交易日，另有满 20 个交易日的例外，长停牌的定价日及金额可能与本回测不同。
+
+仓库的 reference_data/stock_suspensions.csv 保存核实的公开公告区间，可用 --stock-suspensions reference_data/stock_suspensions.csv 指定。表中按完整沪深证券代码区分市场；未列的日期继续按已有证券交易规则判断。定价口径可查[国泰 159338 招募说明书，第十部分](https://static.cninfo.com.cn/finalpage/2025-11-27/1224827367.PDF)。

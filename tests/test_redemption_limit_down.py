@@ -51,6 +51,27 @@ class RedemptionLimitDownTests(unittest.TestCase):
         self.assertEqual({r['symbol'] for r in report['rows']}, {'000001.SZ', '600000.SH'})
         self.assertEqual(len([r for r in sim.fee_rows if r['side'] == 'SELL']), 2)
 
+    def test_redemption_applies_during_suspension_and_only_real_stock_fills_pay_fees(self):
+        day, reopened, deadline = fixtures.DAYS
+        feed = self.fixture.market / "stock_suspensions.csv"
+        feed.write_text(f"symbol,start_date,end_date,source_url\n"
+                        f"000001.SZ,{day},{day},https://source.example/sz\n"
+                        f"600000.SH,{day},{deadline},https://source.example/sh\n")
+        config = replace(self.config, clock_times=tuple(t for t in self.config.clock_times if t != time(9, 30)))
+        rows = self.fixture.market_rows(3.2, 3.1)
+        runner, summary = self.run_model(rows, config)
+        sim = runner.executor
+        self.assertEqual(summary["settled_count"], 1)
+        local, = [r for r in sim.fills if r["symbol"] == "000001.SZ"]
+        self.assertEqual((local["ts"], local["side"]), (datetime.combine(reopened, time(9, 30)), "SELL"))
+        self.assertEqual(local["basis"], "first_tradable_close_after_suspension")
+        self.assertFalse([r for r in sim.fills if r["symbol"] == "600000.SH"])
+        self.assertFalse([r for r in sim.fee_rows if r["symbol"] == "600000.SH"])
+        self.assertEqual(sim.daily[0]["holdings_value"], Decimal("100"))
+        mark, = sim.substitution_pricing
+        self.assertEqual((mark["symbol"], mark["ts"], mark["quantity"]),
+                         ("600000.SH", datetime.combine(deadline, time(15)), 100))
+
     def test_unknown_after_block_does_not_release_and_deadline_only_values_proxy(self):
         day1, day2, day3 = fixtures.DAYS
         bounds = [(day, '600000.SH', '2.2', '1.8', 0) for day in fixtures.DAYS]

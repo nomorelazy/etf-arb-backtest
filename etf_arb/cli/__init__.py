@@ -48,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
         "backtest", help="run decision replay or the configured full-flow research simulation"
     )
     backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
+    backtest_parser.add_argument("--stock-suspensions", type=Path, help="sourced full-day stock suspension intervals")
     backtest_parser.add_argument("--adjusted-reference-prices", type=Path,
                                  help="dated, sourced exchange reference prices for estimating stock limits")
     backtest_parser.add_argument("--etf", nargs="+", choices=FULL_FLOW_ETFS,
@@ -123,6 +124,8 @@ def main() -> int:
 
         try:
             config = RunnerConfig.from_json(args.config)
+            if args.stock_suspensions is not None:
+                config = replace(config, stock_suspensions_path=args.stock_suspensions)
             if args.adjusted_reference_prices is not None:
                 config = replace(config, adjusted_reference_prices_path=args.adjusted_reference_prices)
             if args.premium_threshold is not None:

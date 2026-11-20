@@ -23,6 +23,7 @@ from etf_arb.domain import PCF, TradeDecision
 from etf_arb.engine.backtest import BacktestResult, run_backtest
 from etf_arb.portfolio.ledger import PortfolioLedger
 from etf_arb.rules import InMemoryRuleRepository, RuleRepository
+from etf_arb.rules.suspensions import with_suspensions
 from etf_arb.runner_config import RunnerConfig, RunnerConfigError, load_decisions, load_rules
 
 
@@ -201,6 +202,7 @@ class BacktestRunner:
         rules = self._rules
         if rules is None:
             rules = InMemoryRuleRepository() if config.rules_path is None else load_rules(config.rules_path)
+        rules = with_suspensions(config, rules)
         if config.mode == "execute" or config.rules_path is not None or self._rules is not None:
             for day in config.trading_days:
                 if day <= config.end_date:

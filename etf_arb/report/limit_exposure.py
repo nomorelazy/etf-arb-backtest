@@ -15,6 +15,7 @@ from etf_arb.data.snapshot import component_symbol
 from etf_arb.report.limit_impact import EventPrices
 from etf_arb.report.price_limit_bounds import ReportPriceLimits
 from etf_arb.report.stock_cost import cost_metrics, decimal, timestamp
+from etf_arb.rules.suspensions import StockSuspensions, with_suspensions
 from etf_arb.rules import InMemoryRuleRepository
 from etf_arb.runner_config import load_rules
 
@@ -303,6 +304,7 @@ def build_limit_exposure(config, trades, orders, fills, fees, pricing, blocks, s
     horizon = timestamp(observed_through)
     data = dict(schema_version=2, selection_basis='recorded_directional_limit_delay',
                 adjusted_references_sha256=AdjustedReferences.from_config(config).sha256,
+                stock_suspensions_sha256=StockSuspensions.from_config(config).sha256,
                 chronological_order='opened_at_then_first_block_then_symbol',
                 records_available=records_available, observed_through=horizon, rows=[],
                 duration_basis='elapsed_clock_minutes_including_lunch_overnight_and_scheduled_wait')
@@ -314,6 +316,7 @@ def build_limit_exposure(config, trades, orders, fills, fees, pricing, blocks, s
     if rules is None:
         path = _setting(config, 'rules_path')
         rules = load_rules(path) if path else InMemoryRuleRepository()
+    rules = with_suspensions(config, rules)
     events = list(blocks) + _initial_substitution_blocks(
         config, trades, orders, substitutions, rules, horizon=horizon, include_followup=not partial_records)
     if partial_records:

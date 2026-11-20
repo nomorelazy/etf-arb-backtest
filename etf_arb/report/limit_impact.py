@@ -22,6 +22,7 @@ from etf_arb.domain import Side
 from etf_arb.execution.plan import build_plan
 from etf_arb.pricing.iopv import fixed_substitution_amount
 from etf_arb.report.stock_cost import decimal, timestamp
+from etf_arb.rules.suspensions import StockSuspensions, with_suspensions
 from etf_arb.rules import InMemoryRuleRepository
 from etf_arb.report.price_limit_bounds import ReportPriceLimits
 from etf_arb.runner_config import load_rules
@@ -179,11 +180,13 @@ def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), su
     def setting(name, default=None):
         return config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
 
-    data = dict(schema_version=3, selection_basis="trade_open", rows=[], coverage=[], events=[])
+    data = dict(schema_version=3, selection_basis="trade_open", rows=[], coverage=[], events=[],
+                stock_suspensions_sha256=StockSuspensions.from_config(config).sha256)
     if not trades:
         return data
     if rules is None:
         rules = load_rules(setting("rules_path")) if setting("rules_path") else InMemoryRuleRepository()
+    rules = with_suspensions(config, rules)
     pcfs = FilePCFRepository(setting("pcf_root"))
     cache = {}
 

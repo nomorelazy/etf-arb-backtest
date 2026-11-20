@@ -18,6 +18,7 @@ from etf_arb.report.price_limit_bounds import ReportPriceLimits
 from etf_arb.report.prior_closes import prior_closes_match
 from etf_arb.report.signal_risk import RiskEventPrices, _etf_market, _setting
 from etf_arb.report.stock_cost import decimal, timestamp
+from etf_arb.rules.suspensions import StockSuspensions, with_suspensions
 from etf_arb.rules import InMemoryRuleRepository
 from etf_arb.rules.limit_reference import OPENING_PROXY_SOURCE, OPENING_PROXY_TIME, opening_proxy_is_future
 from etf_arb.runner_config import load_rules
@@ -113,7 +114,7 @@ def _snapshot(row, basket, limits, prices):
         valid_price_count += bar is not None
         status = limits.status(symbol, at)
         issue = prices.issues.get((symbol, at))
-        if issue:
+        if issue and source != "stock_suspended":
             status = "unknown:" + issue
         if status is None:
             continue
@@ -279,6 +280,7 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
         if rules is None:
             path = _setting(config, "rules_path")
             rules = load_rules(path) if path else InMemoryRuleRepository()
+        rules = with_suspensions(config, rules)
         if prices is None:
             prices = RiskEventPrices(minute_root)
         prices.read(requests)
@@ -307,7 +309,7 @@ def build_limit_value(config, trades, signals, *, rules=None, prices=None, prior
                    reference_source_counts=dict(resource_counts))
     return dict(schema_version=2, selection_basis="signal_minute_limit_stock_values",
                 rows=rows, summary=summary, prior_closes_sha256=feed_sha256,
-                adjusted_references_sha256=adjusted_sha256)
+                adjusted_references_sha256=adjusted_sha256, stock_suspensions_sha256=StockSuspensions.from_config(config).sha256)
 
 
 def save_limit_value(output, data):

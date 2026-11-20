@@ -10,6 +10,7 @@ LIMIT_VALUE_LINK = '<p class="lv-top"><a href="#limit-values">查看信号时涨
 
 _LABELS = {
     "provided": "已提供的当日限价",
+    "stock_suspended": "公告停牌",
     "adjusted_reference_price": "按当日除权除息参考价推算",
     "provided_no_limit": "明确无价格限制",
     "no_limit": "明确无价格限制",

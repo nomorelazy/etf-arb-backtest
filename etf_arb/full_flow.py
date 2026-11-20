@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 
 from etf_arb.data.snapshot import DailyCloseCache
+from etf_arb.rules.suspensions import StockSuspensions
 from etf_arb.rules.price_limit_bounds import StockPriceLimits
 from etf_arb.decision.premium import PremiumDiscountSource
 from etf_arb.execution.simulator import ArbitrageSimulator
@@ -52,6 +53,7 @@ def make_full_runner(config, *, rules=None):
         summary = dict(
             etf_code=etf_code,
             adjusted_references_sha256=limits.adjusted.sha256,
+            stock_suspensions_sha256=StockSuspensions.from_config(config).sha256,
             settle_estimated_cash_at_application=settings.settle_estimated_cash_at_application,
             premium_threshold=str(settings.premium_threshold),
             blocked_trade_minutes=list(settings.blocked_trade_minutes),
@@ -121,7 +123,8 @@ def make_full_runner(config, *, rules=None):
             security_rule_policy=settings.security_rule_policy,
             creation_signal_gate="Positive-quantity real constituents that cannot be bought and forbid cash substitution block CREATE before signal emission. Zero-quantity rows and the aggregate cash placeholder do not block. REDEEM is unchanged.",
             optional_creation_substitution="When an allowed domestic constituent cannot be bought at signal time, the research deposit is current exact minute close * shares * (1 + PCF creation premium). Missing close/premium leaves the creation unavailable. The deposit is funded once and adjusted after pricing.",
-            status_limitations="No historical bid/ask, volume, suspension master or adjusted daily price limits supplied. Missing bars never fill. Supplied dated security rules are enforced.",
+            status_limitations="Announced, dated stock suspensions block equity fills even when minute marks exist. The sparse notice feed covers recorded intervals only. No volume or order-book execution model.",
+            substitution_calendar="Research deadlines use the configured exchange-day calendar. For 159338 the fund prospectus instead counts two normal trading days of the underlying, subject to a 20-exchange-day exception.",
             applications=("Assume immediate confirmation once full PCF consideration is available before cutoff. Domestic physical redemption stocks sell in the t+1 application minute when tradable; cross-market proxies use the first tradable minute through the deadline. " + creation_exit_policy if settings.market_split_execution else "Assume successful immediate confirmation once the full PCF consideration is available before cutoff; received assets may sell on a later minute"),
             failed_basket=("User assumes all baskets can be completed. Preflight all entry quotes, rules, application permission and full cash before any leg fills; own orders are not size-capped or reduced to affordable partial lots. Contradictory inputs fail the run, without creating partial holdings or HELD_PENDING_POLICY." if settings.assume_full_basket_fill else "Explicit legacy partial-basket experiment: keep acquired securities and the unfinished cycle; pause remaining entry orders pending an explicit disposition policy. No automatic unwind or next-day application with yesterday's PCF."),
             funding=("No borrowing/shorting. Signed estimated cash is exchanged at application, then adjusted with the T+1 PCF's actual amount."

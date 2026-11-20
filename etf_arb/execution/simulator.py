@@ -44,6 +44,7 @@ class SimOrder:
     next_minute_attempted_at: datetime | None = None
     last_cross_market_attempted_at: datetime | None = None
     awaiting_limit_release: bool = False
+    waiting_after_suspension: bool = False
     deadline_price: Decimal | None = None
 
     @property
@@ -299,6 +300,12 @@ class ArbitrageSimulator:
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
+            if block == "stock_suspended" and trade.decision.side is Side.REDEEM:
+                if order.purpose == "EXIT" and not physical_retry:
+                    order.waiting_after_suspension = True
+                    self._queue_physical_sale(order, trade, context)
+                elif order.purpose == "MANAGER" and self._cross_market_proxy(order.symbol):
+                    order.last_cross_market_attempted_at = context.now
             if block and block.startswith("limit_up:"):
                 order.awaiting_limit_release = True
             return
@@ -313,10 +320,7 @@ class ArbitrageSimulator:
                 if order.purpose == "MANAGER" and self._cross_market_proxy(order.symbol):
                     order.last_cross_market_attempted_at = context.now
                 elif order.purpose == "EXIT" and not physical_retry:
-                    start_clock = not self._physical_retries
-                    self._physical_retries[order.order_id] = (order, trade)
-                    if start_clock:
-                        self._schedule_physical_retries(context)
+                    self._queue_physical_sale(order, trade, context)
                 return
             if order.awaiting_limit_release and status and status.startswith("unknown:"):
                 order.last_block = status
@@ -366,6 +370,7 @@ class ArbitrageSimulator:
                                        else "manager_first_tradable_close_proxy") if proxy_window
                                       else "manager_scheduled_close_proxy")
                                      if order.purpose == "MANAGER" else
+                                     "first_tradable_close_after_suspension" if physical_retry and order.waiting_after_suspension else
                                      "signal_minute_close" if at_signal else "next_minute_close"))
         self.fee_rows.append(dict(ts=context.now, trade_id=trade.trade_id, order_id=order.order_id,
             symbol=order.symbol, side=order.side, purpose=order.purpose,
@@ -503,6 +508,12 @@ class ArbitrageSimulator:
 
     def _cross_market_proxy(self, symbol):
         return symbol.endswith(f".{self.proxy_market}")
+
+    def _queue_physical_sale(self, order, trade, context):
+        start_clock = not self._physical_retries
+        self._physical_retries[order.order_id] = order, trade
+        if start_clock:
+            self._schedule_physical_retries(context)
 
     def _schedule_physical_retries(self, context):
         when = next_stock_execution_minute(context.now, context.resources.config.trading_days)

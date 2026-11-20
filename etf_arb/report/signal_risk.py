@@ -22,6 +22,7 @@ from etf_arb.pricing.iopv import (SubstitutionKind, _normalize_substitution_flag
 from etf_arb.report.limit_impact import EventPrices
 from etf_arb.report.price_limit_bounds import ReportPriceLimits
 from etf_arb.report.stock_cost import decimal, timestamp
+from etf_arb.rules.suspensions import StockSuspensions, with_suspensions
 from etf_arb.rules import InMemoryRuleRepository
 from etf_arb.rules.errors import RuleNotFoundError
 from etf_arb.runner_config import load_rules
@@ -161,7 +162,7 @@ def _summary(rows, unknown, category, basket):
 def build_signal_risk(config, trades, signals, *, rules=None):
     """Build trade-time snapshots in one batched minute read per required month."""
     data = dict(schema_version=SCHEMA_VERSION, selection_basis=SELECTION_BASIS,
-        component_scope=COMPONENT_SCOPE,
+        component_scope=COMPONENT_SCOPE, stock_suspensions_sha256=StockSuspensions.from_config(config).sha256,
         mandatory_scope="pcf_mandatory_only", price_basis="exact_signal_minute_or_pcf_fixed_cash",
         weight_basis="signal_iopv_times_etf_shares", rows=[], trades=[])
     if not trades:
@@ -169,6 +170,7 @@ def build_signal_risk(config, trades, signals, *, rules=None):
     if rules is None:
         path = _setting(config, "rules_path")
         rules = load_rules(path) if path else InMemoryRuleRepository()
+    rules = with_suspensions(config, rules)
     pcfs = FilePCFRepository(_setting(config, "pcf_root"))
     contexts, cache, requests = {}, {}, defaultdict(set)
     signal_map = {timestamp(row["ts"]): row for row in signals}
@@ -241,9 +243,11 @@ def build_signal_risk(config, trades, signals, *, rules=None):
             tags = []
             rule = _security_rule(rules, symbol, component.security_code, at.date())
             suspended = rule.is_suspended if rule is not None else None
+            feed = getattr(rules, "suspensions", None)
+            notice = feed.on(symbol, at.date()) if feed is not None else None
             status = limits.status(symbol, at)
             quote_issue = prices.issues.get((symbol, at))
-            if quote_issue:
+            if quote_issue and not notice:
                 status = 'unknown:' + quote_issue
             elif status == 'unknown:missing_previous_close' and pcf.pre_trading_day:
                 previous_issue = prices.issues.get((symbol, datetime.combine(pcf.pre_trading_day, time(15))))
@@ -295,7 +299,8 @@ def build_signal_risk(config, trades, signals, *, rules=None):
                 signal_price=bar.close if bar else None, signal_price_at=bar.time if bar else None,
                 valuation_basis=basis, signal_value=value, basket_value=basket,
                 etf_weight=_weight(value, basket), limit_status=kind, limit_source=source,
-                is_suspended=suspended, suspension_source="provided_security_rule" if rule else "missing_security_rule",
+                is_suspended=suspended, suspension_source=notice.source_url if notice else (
+                    "provided_security_rule" if rule else "missing_security_rule"),
                 pcf_mandatory=mandatory, valuation_issue=issue)
             selected_rows.append(row)
         data["rows"].extend(selected_rows)

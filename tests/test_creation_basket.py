@@ -165,6 +165,25 @@ class CreationBasketTests(unittest.TestCase):
         self.assertIn("深市成分股买入转现金替代", html)
         self.assertIn("signal_minute_close_plus_pcf_premium", html)
 
+    def test_cash_creation_still_applies_when_a_priced_stock_is_suspended(self):
+        self.fixture.market.joinpath("stock_suspensions.csv").write_text(
+            "symbol,start_date,end_date,source_url\n000001.SZ,2025-01-02,2025-01-06,https://source.example/hold\n")
+        config = self.fixture.config
+        for flag in ("1", "2"):
+            with self.subTest(flag=flag):
+                self.component(SubstituteFlag=flag, CreationCashSubstitute="110", RedemptionCashSubstitute="90")
+                runner, summary = self.fixture.run_model(config=replace(config, output_dir=self.fixture.root / flag))
+                sim = runner.executor
+                self.assertEqual(summary["settled_count"], 1)
+                self.assertFalse(any(r["symbol"] == "000001.SZ" for r in sim.fills + sim.fee_rows))
+                self.assertIsNotNone(sim.trades[0].applied_at)
+                if flag == "1":
+                    self.assertEqual(sim.creation_substitutions[0]["deposit"], D("110"))
+                    self.assertTrue(any(r["symbol"] == "000001.SZ" for r in sim.substitution_pricing))
+                else:
+                    self.assertFalse(sim.creation_substitutions)
+                    self.assertFalse(any(o.symbol == "000001.SZ" for o in sim.orders))
+
     def test_zero_quantity_forbidden_suspended_component_does_not_block(self):
         self.component("000002", SubstituteFlag="0", ComponentShare="0")
         self.block_buy("000002.SZ", suspended=True)

@@ -231,7 +231,7 @@ def main():
     write_csv(audit / "exchange_adjusted_reference_prices.csv", COLUMNS, added)
     before = file_hash(target)
     existing = existing_prices(target)
-    conflicts = [dict(date=key[0], symbol=key[1], existing_price=row["reference_price"], exchange_price=checked[key])
+    conflicts = [dict(date=key[0], symbol=key[1], existing_price=row["reference_price"], exchange_price=format(checked[key], ".2f"))
                  for key, row in existing.items() if key in checked and Decimal(row["reference_price"]) != checked[key]]
     write_csv(audit / "reference_conflicts.csv", ["date", "symbol", "existing_price", "exchange_price"], conflicts)
     new = {(r["date"], r["symbol"]): r for r in added if (r["date"], r["symbol"]) not in existing}

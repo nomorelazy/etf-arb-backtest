@@ -86,6 +86,11 @@ class StockPriceLimits:
             components.setdefault(component_symbol(component), component)
         self.bounds = {symbol: (self.provided[day, symbol], "provided")
                        for symbol in components if (day, symbol) in self.provided}
+        suspensions = getattr(rules, "suspensions", None)
+        if suspensions is not None:
+            for symbol in components:
+                if suspensions.on(symbol, day):
+                    self.bounds[symbol] = (None, None), "stock_suspended"
         estimated_symbols = components.keys() - self.bounds.keys()
         references = load_limit_references(pcf, estimated_symbols, self.previous, self.opening, self.adjusted)
         for symbol in sorted(estimated_symbols):

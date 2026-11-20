@@ -18,7 +18,7 @@ from etf_arb.report.io import load_equity_csv
 from etf_arb.report.ledger import save_ledger_report
 from etf_arb.report.limit_exposure import build_from_saved_records, planned_execution_limit_exposure
 from etf_arb.report.limit_value import limit_value_from_run
-from etf_arb.data.prior_closes import adjusted_references_match
+from etf_arb.data.prior_closes import limit_inputs_match
 from etf_arb.report.prior_closes import prior_closes_match
 from etf_arb.report.models import ClosedTrade
 from etf_arb.report.render import save_report
@@ -90,7 +90,7 @@ def saved_limit_exposure(run_dir, config, trades, fills, fees, pricing, signals,
     orders = read_rows(run_dir / 'orders.csv')
     inputs = dict(substitutions=substitutions, settlements=settlements, stock_rows=impact['rows'])
     if (cached.get('records_available') and cached.get('selection_basis') == 'recorded_directional_limit_delay'
-            and adjusted_references_match(cached, config)):
+            and limit_inputs_match(cached, config)):
         return planned_execution_limit_exposure(cached, config, trades, orders, fills, pricing, **inputs)
     block_log = run_dir / 'execution_limit_blocks.csv'
     enforced = (config.get('simulation') or {}).get('enforce_stock_price_limits')

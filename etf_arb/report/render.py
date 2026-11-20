@@ -238,6 +238,10 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                     f"<p>本轮门槛：申购溢价严格大于 {Decimal(creation_threshold):.4%}；"
                     f"赎回折价幅度严格大于 {Decimal(redemption_threshold):.4%}。"
                     "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
+        if financial_summary.get('etf_code') == '159338':
+            details += ("<p>159338 本回测按配置的交易所交易日历确定现金替代定价期限。"
+                        "国泰招募说明书对允许替代按个股正常交易日计算，另设 20 个交易日特例。"
+                        "长时间停牌时，模拟定价日和退补金额可能与基金实务不同。</p>")
         if financial_summary.get('frequency_anchor') == 'application_submitted_at':
             details += (f"<p>交易节奏：以上一笔实际提交申赎时间起算，满 {financial_summary['min_trade_interval_minutes']} 分钟后，"
                         "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"

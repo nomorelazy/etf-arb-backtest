@@ -10,6 +10,7 @@ from urllib.parse import urlsplit
 
 from etf_arb.data.adjusted_references import AdjustedReferences
 from etf_arb.data.minute_close import MinuteCloseBar
+from etf_arb.rules.suspensions import StockSuspensions
 from decimal import Decimal
 
 
@@ -29,23 +30,28 @@ def report_prior_path(config, override=None):
     return None
 
 
-def adjusted_references_match(data, config):
+def _detached(config):
     for key in ("minute_root", "pcf_root"):
         root = _setting(config, key)
         if root and not Path(root).is_dir():
             return True
-    return data.get("adjusted_references_sha256") == AdjustedReferences.from_config(config).sha256
+    return False
+
+
+def limit_inputs_match(data, config):
+    if _detached(config):
+        return True
+    return (data.get("adjusted_references_sha256") == AdjustedReferences.from_config(config).sha256
+            and data.get("stock_suspensions_sha256") == StockSuspensions.from_config(config).sha256)
 
 
 def prior_closes_match(data, config):
     """A detached run may use its snapshot; an available changed feed invalidates it."""
     if not isinstance(data, dict):
         return False
-    for key in ("minute_root", "pcf_root"):
-        root = _setting(config, key)
-        if root and not Path(root).is_dir():
-            return True
-    if data.get("adjusted_references_sha256") != AdjustedReferences.from_config(config).sha256:
+    if _detached(config):
+        return True
+    if not limit_inputs_match(data, config):
         return False
     path = report_prior_path(config)
     if path and path.is_file():

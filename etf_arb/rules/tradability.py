@@ -4,6 +4,9 @@ from etf_arb.rules.errors import RuleNotFoundError
 
 
 def security_trade_block(repo, symbol, at, side, policy):
+    source = getattr(repo, "suspensions", None)
+    if source is not None and source.on(symbol, at.date()):
+        return "stock_suspended"
     rule = None
     for code in (symbol, symbol.split(".")[0]):
         try:
