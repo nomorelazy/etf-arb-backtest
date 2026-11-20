@@ -12,6 +12,7 @@ from etf_arb.rules.tradability import security_trade_block
 class CreationBasketCheck:
     blocked: dict[str, str] = field(default_factory=dict)
     cash_substitutions: dict[str, Decimal] = field(default_factory=dict)
+    deposit_prices: dict[str, tuple[Decimal, str]] = field(default_factory=dict)
     substitution_reasons: dict[str, str] = field(default_factory=dict)
     data_errors: dict[str, str] = field(default_factory=dict)
 
@@ -19,8 +20,7 @@ class CreationBasketCheck:
 def check_creation_basket(pcf, prices, rules, now, policy, *, limits=None):
     """Use only currently known rules/quotes, never future fill availability.
 
-    Optional domestic substitution deposits use the user's research formula:
-    current exact close * PCF shares * (1 + PCF creation premium).
+    Use the effective prior close for 159338 domestic optional deposits.
     Amounts returned here are per creation unit; build_plan scales them once.
     """
     result = CreationBasketCheck()
@@ -48,9 +48,17 @@ def check_creation_basket(pcf, prices, rules, now, policy, *, limits=None):
         if kind is SubstitutionKind.FORBIDDEN:
             result.blocked[symbol] = block
             continue
-        if bar is None:
-            result.data_errors[symbol] = "missing_substitution_deposit_close"
-            continue
+        if pcf.etf_code == "159338" and symbol.endswith(".SZ"):
+            price, basis = (limits.creation_deposit_reference(pcf, symbol) if limits is not None
+                            else (None, "missing_creation_deposit_reference"))
+            if price is None:
+                result.data_errors[symbol] = basis
+                continue
+        else:
+            if bar is None:
+                result.data_errors[symbol] = "missing_substitution_deposit_close"
+                continue
+            price, basis = bar.close, "signal_minute_close"
         raw_rate = component.creation_premium_rate
         if raw_rate is None:
             result.data_errors[symbol] = "missing_creation_premium_rate"
@@ -59,6 +67,7 @@ def check_creation_basket(pcf, prices, rules, now, policy, *, limits=None):
         if not rate.is_finite() or rate < 0:
             result.data_errors[symbol] = "invalid_creation_premium_rate"
             continue
-        result.cash_substitutions[symbol] = component.quantity * bar.close * (1 + rate)
+        result.deposit_prices[symbol] = price, basis
+        result.cash_substitutions[symbol] = component.quantity * price * (1 + rate)
         result.substitution_reasons[symbol] = block
     return result

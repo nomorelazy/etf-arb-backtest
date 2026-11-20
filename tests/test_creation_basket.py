@@ -22,6 +22,7 @@ class CreationBasketTests(unittest.TestCase):
         self.fixture = fixtures.FullFlowTests()
         self.fixture.setUp()
         self.addCleanup(self.fixture.doCleanups)
+        self.prior_feed = self.fixture.write_prior_closes()
 
     def component(self, code="000001", **changes):
         for path in (self.fixture.pcf / "159338").glob("*.xml"):
@@ -163,7 +164,7 @@ class CreationBasketTests(unittest.TestCase):
         self.assertTrue((self.fixture.config.output_dir / "creation_substitutions.csv").is_file())
         html = (self.fixture.config.output_dir / "report/ledger.html").read_text(encoding="utf-8")
         self.assertIn("深市成分股买入转现金替代", html)
-        self.assertIn("signal_minute_close_plus_pcf_premium", html)
+        self.assertIn("sourced_pcf_previous_close_plus_pcf_premium", html)
 
     def test_cash_creation_still_applies_when_a_priced_stock_is_suspended(self):
         self.fixture.market.joinpath("stock_suspensions.csv").write_text(
@@ -174,12 +175,14 @@ class CreationBasketTests(unittest.TestCase):
                 self.component(SubstituteFlag=flag, CreationCashSubstitute="110", RedemptionCashSubstitute="90")
                 runner, summary = self.fixture.run_model(config=replace(config, output_dir=self.fixture.root / flag))
                 sim = runner.executor
-                self.assertEqual(summary["settled_count"], 1)
+                self.assertEqual(summary["settled_count"], int(flag == "2"))
                 self.assertFalse(any(r["symbol"] == "000001.SZ" for r in sim.fills + sim.fee_rows))
                 self.assertIsNotNone(sim.trades[0].applied_at)
                 if flag == "1":
                     self.assertEqual(sim.creation_substitutions[0]["deposit"], D("110"))
-                    self.assertTrue(any(r["symbol"] == "000001.SZ" for r in sim.substitution_pricing))
+                    self.assertFalse(any(r["symbol"] == "000001.SZ" for r in sim.substitution_pricing))
+                    self.assertEqual(summary["pending_count"], 1)
+                    self.assertIsNone(summary["final_net_pnl"])
                 else:
                     self.assertFalse(sim.creation_substitutions)
                     self.assertFalse(any(o.symbol == "000001.SZ" for o in sim.orders))
@@ -226,14 +229,55 @@ class CreationBasketTests(unittest.TestCase):
         self.assertEqual(plan.manager["000001.SZ"], 200)
         self.assertEqual(D(summary["final_net_pnl"]), D("96"))
 
-    def test_signal_quote_is_required_and_future_bars_are_not_used(self):
+    def test_optional_deposit_uses_verified_reference_before_local_close_then_feed(self):
+        self.block_buy(recover=True, suspended=True)
+        # Market data on the signal minute is 1.00; all reference candidates differ.
+        self.prior_feed.write_text("previous_date,symbol,close,source_url\n"
+                                   "2024-12-31,000001.SZ,0.93,https://example.test/prior\n",
+                                   encoding="utf-8")
+        prior_folder = self.fixture.market / "2024-12"
+        prior_folder.mkdir()
+        path = fixtures.write_market(self.fixture.market, [(datetime(2024, 12, 31, 15), "000001.SZ", 0.95)])
+        historical = path.rename(prior_folder / "close.parquet")
+        adjusted = self.fixture.market / "adjusted_reference_prices.csv"
+        adjusted.write_text("date,symbol,reference_price,source_url\n"
+                            "2025-01-02,000001.SZ,0.97,https://example.test/ex-rights\n", encoding="utf-8")
+        for price, basis, remove_after in (("0.97", "adjusted_reference_price", adjusted),
+                                           ("0.95", "pcf_previous_1500_close", historical),
+                                           ("0.93", "sourced_pcf_previous_close", self.prior_feed)):
+            with self.subTest(basis=basis):
+                config = replace(self.fixture.config, output_dir=self.fixture.root / basis)
+                runner, summary = self.fixture.run_model(config=config)
+                self.assertEqual(summary["opened_count"], 1)
+                route = runner.executor.creation_substitutions[0]
+                self.assertEqual((route["price"], route["observed_price"]), (D(price), D(1)))
+                self.assertEqual(route["basis"], basis + "_plus_pcf_premium")
+                self.assertEqual(route["deposit"], 100 * D(price) * D("1.1"))
+                with (config.output_dir / "creation_substitutions.csv").open(encoding="utf-8-sig") as stream:
+                    saved = next(csv.DictReader(stream))
+                self.assertEqual(D(saved["price"]), D(price))
+                self.assertEqual(D(saved["observed_price"]), D(1))
+                self.assertEqual(D(saved["deposit"]), route["deposit"])
+                self.assertFalse(any(f["symbol"] == "000001.SZ" and f["purpose"] == "ENTRY"
+                                     for f in runner.executor.fills))
+                remove_after.unlink()
+        # A real T-day 09:30 quote and a T-1 14:59 quote still cannot price the deposit.
+        path = fixtures.write_market(self.fixture.market, [(datetime(2024, 12, 31, 14, 59), "000001.SZ", 0.98)])
+        path.rename(historical)
+        runner, summary = self.fixture.run_model()
+        self.assertEqual(summary["opened_count"], 0)
+        self.assertEqual(runner.executor.creation_substitutions, [])
+        self.assertTrue(any("missing_creation_deposit_reference" in (r.get("component_reasons") or "")
+                            for r in runner.source.rows))
+
+    def test_missing_deposit_reference_never_uses_a_later_bar(self):
         self.block_buy()
         pcf = FilePCFRepository(self.fixture.pcf).get("159338", fixtures.DAYS[0])
         cache = Mock()
         cache.get.return_value = None
         now = datetime.combine(fixtures.DAYS[0], time(9, 35))
         check = check_creation_basket(pcf, cache, self.fixture.rules, now, "assume_tradable")
-        self.assertEqual(check.data_errors, {"000001.SZ": "missing_substitution_deposit_close"})
+        self.assertEqual(check.data_errors, {"000001.SZ": "missing_creation_deposit_reference"})
         self.assertEqual(check.cash_substitutions, {})
         cache.get.assert_called_once_with("000001.SZ", now, exact=True)
 

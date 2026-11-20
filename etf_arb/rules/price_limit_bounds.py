@@ -10,6 +10,7 @@ from etf_arb.data.adjusted_references import ADJUSTED_REFERENCE_SOURCE, Adjusted
 from etf_arb.data.prior_closes import PriorCloses, report_prior_path
 from etf_arb.data.snapshot import DailyCloseCache, component_symbol
 from etf_arb.rules.a_share import AShareBoard, a_share_price_limit_rate
+from etf_arb.rules.creation_deposit import creation_deposit_references
 from etf_arb.rules.errors import RuleNotFoundError
 from etf_arb.rules.limit_reference import load_limit_references, opening_proxy_is_future
 
@@ -74,6 +75,13 @@ class StockPriceLimits:
         self.opening = event_prices if event_prices is not None else DailyCloseCache(minute_root)
         self.provided = load_daily_bounds(bounds_path)
         self.bounds = {}
+        self.deposit_pcf = None
+
+    def creation_deposit_reference(self, pcf, symbol):
+        if self.deposit_pcf is not pcf:
+            self.deposit_references = creation_deposit_references(pcf, self.previous, self.adjusted)
+            self.deposit_pcf = pcf
+        return self.deposit_references.get(symbol, (None, "missing_creation_deposit_reference"))
 
     def on_day_open(self, pcf, rules, *, check_basket=True, held_components=()):
         day = pcf.effective_date

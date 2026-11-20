@@ -21,6 +21,7 @@ from etf_arb.rules import TradeFrequencyRule, TradingTimeRule
 from etf_arb.rules.tradability import security_trade_block
 from etf_arb.rules.price_limit_bounds import StockPriceLimits
 from etf_arb.rules.cash_substitution import CashSubstitutionTiming, next_stock_execution_minute
+from etf_arb.rules.security_calendar import exception_close, notice_dates, substitution_deadline
 from etf_arb.settlement.cash import CashLeg, trading_day_after, load_payment_dates
 
 
@@ -45,7 +46,15 @@ class SimOrder:
     last_cross_market_attempted_at: datetime | None = None
     awaiting_limit_release: bool = False
     waiting_after_suspension: bool = False
+    pricing_deadline: date | None = None
+    deadline_basis: str = ""
+    attempt_scheduled_at: datetime | None = None
+    pricing_close_at: datetime | None = None
     deadline_price: Decimal | None = None
+
+    @property
+    def deadline_valuation_price(self):
+        return self.deadline_price
 
     @property
     def last_sh_attempted_at(self):
@@ -69,6 +78,7 @@ class SimTrade:
     reason: str = ""
     redemption_prices_locked_at: datetime | None = None
     delayed_redemption: dict[str, str] = field(default_factory=dict)
+    cross_retry_scheduled_at: datetime | None = None
     signal_reference: dict = field(default_factory=dict)
 
 
@@ -240,12 +250,15 @@ class ArbitrageSimulator:
         for component in pcf.components:
             symbol = component_symbol(component) if not component.is_cash_placeholder else None
             if symbol in plan.optional_creation_substitutions:
+                price, reference = basket.deposit_prices[symbol]
+                observed = self.prices.get(symbol, context.now, exact=True)
                 self.creation_substitutions.append(dict(ts=context.now, trade_id=trade.trade_id,
                     symbol=symbol, quantity=component.quantity * decision.quantity_units,
-                    price=self.prices.get(symbol, context.now, exact=True).close,
+                    price=price, observed_price=observed.close if observed is not None else None,
+                    observation_stage="signal",
                     premium_rate=component.creation_premium_rate,
                     deposit=plan.optional_creation_substitutions[symbol],
-                    reason=basket.substitution_reasons[symbol], basis="signal_minute_close_plus_pcf_premium"))
+                    reason=basket.substitution_reasons[symbol], basis=reference + "_plus_pcf_premium"))
         context.resources.portfolio.open_trade(trade_id=trade.trade_id, opened_at=context.now,
                                                side=decision.side, etf_shares=plan.etf_shares)
         for symbol, quantity in entries.items():
@@ -274,13 +287,12 @@ class ArbitrageSimulator:
                     or context.now != trade.decision.ts + timedelta(minutes=1)):
                 raise ValueError("Next-minute fills require a confirmed market-split t+1 application")
         if order.purpose == "MANAGER":
-            sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
             if self._uses_proxy_window(order):
                 if not proxy_window:
                     return
                 if (trade.applied_at is None or context.now < trade.applied_at
-                        or (sub.pricing_deadline is not None and
-                            context.now > datetime.combine(sub.pricing_deadline, time(15)))):
+                        or (order.pricing_deadline is not None and
+                            context.now > datetime.combine(order.pricing_deadline, time(15)))):
                     raise ValueError("Cross-market proxy attempt is outside application-to-deadline window")
                 if order.last_cross_market_attempted_at == context.now:
                     return
@@ -290,7 +302,7 @@ class ArbitrageSimulator:
             else:
                 if order.manager_attempted_at is not None:
                     return
-                if context.now != sub.attempt_scheduled_at:
+                if context.now != order.attempt_scheduled_at:
                     order.last_block = "waiting_for_scheduled_substitution_attempt"
                     return
                 # Scheduled callback and regular clock may share a timestamp.
@@ -463,27 +475,19 @@ class ArbitrageSimulator:
             cash_estimate = deposit + plan.estimated_cash
             sub_estimate = self._manager_value(trade, now) + plan.domestic_fixed
         trade.legs = [CashLeg("cash_difference", cash_estimate), CashLeg("cash_substitution", sub_estimate)]
-        sub = trade.legs[1]
-        sub.pricing_deadline, sub.notice_due_on, sub.latest_payment_on = self.cash_timing.dates(
-            now.date(), context.resources.config.trading_days,
-            context.resources.config.settlement_business_days)
-        has_scheduled_proxy = (not self.settings.market_split_execution or
-                              any(not self._cross_market_proxy(symbol) for symbol in plan.manager))
-        sub.attempt_scheduled_at = self.cash_timing.attempt_at(sub.pricing_deadline) if has_scheduled_proxy else None
-        if sub.attempt_scheduled_at is not None and sub.attempt_scheduled_at >= now:
-            context.schedule(sub.attempt_scheduled_at,
-                lambda ctx, t=trade: self._attempt_substitution(t, ctx),
-                f"cash.substitution_attempt.{trade.trade_id}")
-        if sub.pricing_deadline is not None:
-            context.schedule(datetime.combine(sub.pricing_deadline, time(15)),
-                lambda ctx, t=trade: self._price_substitution_deadline(t, ctx),
-                f"cash.pricing_deadline.{trade.trade_id}")
+        for symbol, quantity in plan.manager.items():
+            self._order(trade, symbol, "BUY" if side is Side.CREATE else "SELL", quantity, now, "MANAGER")
+        self._schedule_substitution(trade, context)
         for leg in trade.legs:
             leg.payment_at = self.payment_dates.get((trade.trade_id, leg.kind))
             if leg.payment_at is not None:
                 if leg.payment_at <= now:
                     raise ValueError("Cash payment timestamp must follow application confirmation")
-                if leg.kind == "cash_substitution" and leg.notice_due_on is not None and leg.payment_at.date() < leg.notice_due_on:
+                if (leg.kind == "cash_substitution" and leg.pricing_deadline is not None
+                        and leg.payment_at < datetime.combine(leg.pricing_deadline, time(15))):
+                    raise ValueError("Supplied substitution payment precedes final pricing")
+                if (leg.kind == "cash_substitution" and not self._uses_security_calendar()
+                        and leg.notice_due_on is not None and leg.payment_at.date() < leg.notice_due_on):
                     raise ValueError("Substitution payment precedes the ordinary notice date; verify the supplied record")
                 leg.payment_basis = "supplied_payment_timestamp"
                 leg.due = leg.payment_at.date()
@@ -491,8 +495,6 @@ class ArbitrageSimulator:
                     context.schedule(leg.payment_at,
                         lambda ctx, t=trade, l=leg: self._record_payment(t, l, ctx),
                         f"cash.payment.{trade.trade_id}.{leg.kind}")
-        for symbol, quantity in plan.manager.items():
-            self._order(trade, symbol, "BUY" if side is Side.CREATE else "SELL", quantity, now, "MANAGER")
         if self.settings.market_split_execution:
             self._attempt_cross_market_substitution(trade, context)
             if side is Side.REDEEM or self.settings.entry_at_signal_time:
@@ -505,6 +507,47 @@ class ArbitrageSimulator:
                 if not trade.delayed_redemption:
                     trade.redemption_prices_locked_at = now
         # Optional domestic replacements retain the scheduled T+2 attempt.
+
+    def _uses_security_calendar(self):
+        return self.etf_symbol == "159338.SZ" and self.cash_timing.pricing_trading_days == 2
+
+    def _schedule_substitution(self, trade, context):
+        config = context.resources.config
+        applied_on = trade.applied_at.date()
+        default_deadline, _, _ = self.cash_timing.dates(applied_on, config.trading_days)
+        orders = self._orders(trade, "MANAGER")
+        attempts = set()
+        for order in orders:
+            if self._uses_security_calendar():
+                deadline, capped = substitution_deadline(
+                    order.symbol, applied_on, config.trading_days, context.resources.rules)
+                order.deadline_basis = ("exchange_20_day_cap" if capped else "second_normal_session"
+                                        if deadline is not None else "undetermined")
+            else:
+                deadline = default_deadline
+                order.deadline_basis = "configured_trading_sessions"
+            order.pricing_deadline = deadline
+            if (deadline is not None and order.deadline_basis != "exchange_20_day_cap"
+                    and not self._uses_proxy_window(order)):
+                order.attempt_scheduled_at = self.cash_timing.attempt_at(deadline)
+                if order.attempt_scheduled_at >= trade.applied_at:
+                    attempts.add(order.attempt_scheduled_at)
+
+        sub = trade.legs[1]
+        deadlines = {order.pricing_deadline for order in orders} or {default_deadline}
+        sub.pricing_deadline = None if None in deadlines else max(deadlines)
+        cap = any(o.deadline_basis == "exchange_20_day_cap" and o.pricing_deadline == sub.pricing_deadline
+                  for o in orders)
+        sub.notice_due_on, sub.latest_payment_on = notice_dates(
+            sub.pricing_deadline, config.settlement_business_days, cap_exchange_days=config.trading_days if cap else None)
+        sub.attempt_scheduled_at = next(iter(attempts)) if len(attempts) == 1 else None
+        for at in sorted(attempts):
+            context.schedule(at, lambda ctx: self._attempt_substitution(trade, ctx),
+                             f"cash.substitution_attempt.{trade.trade_id}")
+        for deadline in sorted(day for day in deadlines if day is not None):
+            context.schedule(datetime.combine(deadline, time(15)),
+                             lambda ctx: self._price_substitution_deadline(trade, ctx),
+                             f"cash.pricing_deadline.{trade.trade_id}")
 
     def _cross_market_proxy(self, symbol):
         return symbol.endswith(f".{self.proxy_market}")
@@ -540,7 +583,7 @@ class ArbitrageSimulator:
                 continue
             if self.settings.market_split_execution and self._cross_market_proxy(order.symbol):
                 continue
-            if order.manager_attempted_at is not None:
+            if order.manager_attempted_at is not None or order.attempt_scheduled_at != context.now:
                 continue
             requested, before = order.remaining, order.filled
             self._fill(order, trade, context)
@@ -553,15 +596,18 @@ class ArbitrageSimulator:
                 timing="scheduled_substitution"))
         self._settle(trade, context)
         if not self.settings.market_split_execution and trade.decision.side is Side.REDEEM:
-            self._attempt_cross_market_substitution(trade, context)
+            self._schedule_cross_market_retry(trade, context)
 
     def _attempt_cross_market_substitution(self, trade, context, *, schedule_next=True):
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
+        if trade.cross_retry_scheduled_at == context.now:
+            trade.cross_retry_scheduled_at = None
         if sub.final is not None or trade.state != "APPLIED":
             return
         for order in self._orders(trade, "MANAGER"):
             if (not self._uses_proxy_window(order) or not order.remaining or order.paused
-                    or order.last_cross_market_attempted_at == context.now):
+                    or order.last_cross_market_attempted_at == context.now
+                    or (order.pricing_deadline is not None and context.now.date() > order.pricing_deadline)):
                 continue
             requested, before = order.remaining, order.filled
             self._fill(order, trade, context, proxy_window=True)
@@ -574,12 +620,21 @@ class ArbitrageSimulator:
                 timing=(f"{self.proxy_market.lower()}_next_minute" if context.now == trade.applied_at
                         else f"{self.proxy_market.lower()}_first_tradable_window")))
         self._settle(trade, context)
+        if schedule_next:
+            self._schedule_cross_market_retry(trade, context)
+
+    def _schedule_cross_market_retry(self, trade, context):
+        if trade.cross_retry_scheduled_at is not None:
+            return
         pending = any(self._uses_proxy_window(o) and o.remaining and not o.paused
+                      and (o.pricing_deadline is None or context.now < datetime.combine(o.pricing_deadline, time(15)))
                       for o in self._orders(trade, "MANAGER"))
-        if schedule_next and pending:
+        if pending:
+            sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
             next_at = self.cash_timing.next_sh_attempt(
                 context.now, context.resources.config.trading_days, sub.pricing_deadline)
             if next_at is not None:
+                trade.cross_retry_scheduled_at = next_at
                 context.schedule(next_at, lambda ctx, t=trade: self._attempt_cross_market_substitution(t, ctx),
                                  f"cash.{self.proxy_market.lower()}_first_tradable.{trade.trade_id}")
 
@@ -595,8 +650,8 @@ class ArbitrageSimulator:
                 if order.fee:
                     result += order.fee if trade.decision.side is Side.CREATE else -order.fee
             if required > filled:
-                if order is not None and order.deadline_price is not None:
-                    result += (required - filled) * order.deadline_price
+                if order is not None and order.deadline_valuation_price is not None:
+                    result += (required - filled) * order.deadline_valuation_price
                     continue
                 bar = self.prices.get(symbol, now)
                 if bar:
@@ -616,7 +671,9 @@ class ArbitrageSimulator:
                             else manager_value + plan.domestic_fixed)
         for leg in trade.legs:
             if leg.payment_at is not None:
-                continue  # Exact payment callbacks are independent of trading windows.
+                if leg.payment_at == now and leg.final is not None:
+                    self._record_payment(trade, leg, context)
+                continue
             if leg.paid or leg.final is None or leg.due is None or now.date() < leg.due:
                 continue
             self._record_payment(trade, leg, context)
@@ -650,45 +707,61 @@ class ArbitrageSimulator:
 
     def _price_substitution_deadline(self, trade, context):
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
-        if sub.final is not None or sub.pricing_deadline != context.now.date():
-            return
-        if context.now.time() == time(15):
-            # The deadline callback may precede the queued 15:00 retry. Give
-            # that inclusive last minute a chance before valuing unfilled stock.
-            self._attempt_cross_market_substitution(trade, context, schedule_next=False)
+        today = context.now.date()
         orders = self._orders(trade, "MANAGER")
-        outstanding = [order for order in orders if order.remaining]
-        at_close = datetime.combine(context.now.date(), time(15))
-        prices = {order.order_id: self.prices.get(order.symbol, at_close, exact=True) for order in outstanding}
-        missing = any(bar is None for bar in prices.values())
-        if missing:
-            trade.reason = "missing_substitution_deadline_close"
-            if trade.decision.side is Side.CREATE:
-                return
-        for order in outstanding:
-            bar = prices[order.order_id]
-            if bar is None:
+        due_orders = [order for order in orders if order.pricing_deadline == today and order.remaining]
+        if sub.final is not None or (not due_orders and sub.pricing_deadline != today):
+            return
+        at_close = datetime.combine(today, time(15))
+        if context.now < at_close:
+            return
+        if context.now == at_close:
+            # The deadline callback can precede the retry for the inclusive last minute.
+            self._attempt_cross_market_substitution(trade, context, schedule_next=False)
+        config = context.resources.config
+        for order in due_orders:
+            if not order.remaining:
                 continue
-            order.deadline_price = bar.close
+            capped = order.deadline_basis == "exchange_20_day_cap"
+            bar = (exception_close(order.symbol, today, config.trading_days, context.resources.rules, config)
+                   if capped else self.prices.get(order.symbol, at_close, exact=True))
+            if bar is None:
+                trade.reason = "missing_substitution_deadline_close"
+                continue
             self.substitution_pricing.append(dict(trade_id=trade.trade_id, symbol=order.symbol,
                 quantity=order.remaining, price=bar.close, ts=at_close,
-                basis="unfilled_quantity_at_deadline_close"))
-            order.cancelled = True  # Stop only the proxy order; this is not an investor fill.
+                basis="unfilled_quantity_at_last_actual_close" if capped else "unfilled_quantity_at_deadline_close",
+                source_ts=bar.time))
+            order.deadline_price = bar.close
+            order.pricing_close_at = bar.time
+            order.cancelled = True
             order.last_block = "valued_at_pricing_deadline_close"
-        if missing:
-            return
-        value = self._manager_value(trade, at_close)
-        sub.final = (trade.plan.substitution_deposit - value if trade.decision.side is Side.CREATE
-                     else value + trade.plan.domestic_fixed)
-        sub.estimate = sub.final
+        if sub.pricing_deadline == today and sub.final is None and all(not order.remaining for order in orders):
+            value = self._manager_value(trade, context.now)
+            sub.estimate = (trade.plan.substitution_deposit - value if trade.decision.side is Side.CREATE
+                            else value + trade.plan.domestic_fixed)
+            self._confirm_substitution(trade, context, orders)
+            self._settle(trade, context)
+
+    def _confirm_substitution(self, trade, context, orders):
+        sub = trade.legs[1]
+        sub.final = sub.estimate
         sub.known_on, sub.priced_at = context.now.date(), context.now
-        sub.pricing_basis = ("filled_proxy_values_plus_deadline_close" if any(o.deadline_price is not None for o in orders)
-                             else "completed_manager_close_proxy")
-        if sub.payment_at is None and self.settings.cash_substitution_lag is not None:
-            sub.due = trading_day_after(context.resources.config.trading_days, trade.applied_at.date(),
-                                       self.settings.cash_substitution_lag)
-            sub.payment_basis = "explicit_research_lag"
-        self._settle(trade, context)
+        sub.pricing_basis = ("filled_proxy_values_plus_deadline_close" if any(
+            o.deadline_valuation_price is not None for o in orders) else "completed_manager_close_proxy")
+        if sub.payment_at is not None:
+            if sub.payment_at < sub.priced_at:
+                raise ValueError("Supplied substitution payment precedes final pricing")
+            return
+        lag = self.settings.cash_substitution_lag
+        if lag is None:
+            return
+        days = context.resources.config.trading_days
+        sub.due = trading_day_after(days, trade.applied_at.date(), lag)
+        if self._uses_security_calendar() and orders:
+            after_pricing = trading_day_after(days, sub.known_on, max(0, lag - 2))
+            sub.due = max(sub.due, after_pricing) if sub.due and after_pricing else None
+        sub.payment_basis = "explicit_research_lag"
 
     def _close_if_done(self, trade, context):
         if trade.state in {"BUILD", "HELD_PENDING_POLICY", "CLOSED"} or self.account.holdings(trade.trade_id):

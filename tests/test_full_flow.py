@@ -47,6 +47,12 @@ class FullFlowTests(unittest.TestCase):
                                    simulation=SimulationConfig(premium_threshold=D("0.004"), cash_substitution_lag=2, cash_difference_lag=1, security_rule_policy="assume_tradable", blocked_trade_minutes=(), trading_sessions=(("09:30", "11:29"), ("13:00", "14:56")), fees=FeeRates.zero(), market_split_execution=False, entry_at_signal_time=False))
         self.write_pcfs()
 
+    def write_prior_closes(self, symbols=("000001.SZ",)):
+        path = self.market / "report_prior_closes.csv"
+        rows = [f"2024-12-31,{symbol},1.00,https://example.test/prior" for symbol in symbols]
+        path.write_text("previous_date,symbol,close,source_url\n" + "\n".join(rows) + "\n", encoding="utf-8")
+        return path
+
     def write_pcfs(self, wrong_date=False):
         folder = self.pcf / "159338"
         folder.mkdir(exist_ok=True)
@@ -103,7 +109,7 @@ class FullFlowTests(unittest.TestCase):
         self.assertEqual(cash.known_on, DAYS[1])
         self.assertEqual(cash.due, DAYS[2])
         self.assertTrue((self.config.output_dir / "report/report.html").is_file())
-        raw = json.loads((self.config.output_dir / "run_summary.json").read_text())
+        raw = json.loads((self.config.output_dir / "run_summary.json").read_text(encoding="utf-8"))
         self.assertTrue(raw["financial_results_available"])
         self.assertEqual(D(raw["net_pnl"]), D("48"))
 
@@ -227,6 +233,7 @@ class FullFlowTests(unittest.TestCase):
         self.assertFalse(any(f["purpose"] == "MANAGER" for f in runner.executor.fills))
 
     def test_strict_policy_does_not_invent_security_rules(self):
+        self.write_prior_closes()
         config = replace(self.config, simulation=replace(self.config.simulation, security_rule_policy="require"))
         runner, summary = self.run_model(config=config)
         self.assertFalse(runner.executor.fills)

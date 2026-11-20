@@ -50,7 +50,15 @@ def make_full_runner(config, *, rules=None):
         investor_fees = sum((row["total"] for row in executor.fee_rows if row["charged_to"] == "investor_cash"), Decimal("0"))
         manager_fees = fee_totals["total"] - investor_fees
         period = resources.portfolio.summarize_pnl(config.start_date, config.end_date)
+        individual_calendar = config.etf_codes[0] == "159338" and settings.cash_substitution_pricing_days == 2
+        pricing_note = ('159338 的允许现金替代逐股计日。申请日后，证券正常交易的第二个交易日收盘时，已成交部分用原成交价及费用，剩余部分用当日收盘价估值。自申请日算起满 20 个交易日仍不足两个个股正常交易日，余量取最近一次实际收盘价。估值不收成交税费。'
+                        if individual_calendar else
+                        f"本轮按配置的交易所交易日历确定替代期限，申请日后第 {settings.cash_substitution_pricing_days} 个交易日到期。")
         summary = dict(
+            individual_substitution_calendar=individual_calendar,
+            substitution_pricing_note=pricing_note,
+            optional_creation_deposit_note=('159338 本市场可选替代的申购预收款＝股数×除权除息调整后的前收盘价×（1＋PCF 溢价比例）。预收款与最后退补相抵。'
+                                            if config.etf_codes[0] == "159338" else ""),
             etf_code=etf_code,
             adjusted_references_sha256=limits.adjusted.sha256,
             stock_suspensions_sha256=StockSuspensions.from_config(config).sha256,
@@ -122,7 +130,7 @@ def make_full_runner(config, *, rules=None):
             liquidity="Own orders and cross-market first-tradable-minute proxies fill in full at an exact permitted close. max_shares_per_minute applies to scheduled optional replacements (all scheduled proxies in legacy mode). No volume data.",
             security_rule_policy=settings.security_rule_policy,
             creation_signal_gate="Positive-quantity real constituents that cannot be bought and forbid cash substitution block CREATE before signal emission. Zero-quantity rows and the aggregate cash placeholder do not block. REDEEM is unchanged.",
-            optional_creation_substitution="When an allowed domestic constituent cannot be bought at signal time, the research deposit is current exact minute close * shares * (1 + PCF creation premium). Missing close/premium leaves the creation unavailable. The deposit is funded once and adjusted after pricing.",
+            optional_creation_substitution=(summary["optional_creation_deposit_note"] or "When an allowed domestic constituent cannot be bought at signal time, the research deposit is current exact minute close * shares * (1 + PCF creation premium). Missing close/premium leaves the creation unavailable. The deposit is funded once and adjusted after pricing."),
             status_limitations="Announced, dated stock suspensions block equity fills even when minute marks exist. The sparse notice feed covers recorded intervals only. No volume or order-book execution model.",
             substitution_calendar="Research deadlines use the configured exchange-day calendar. For 159338 the fund prospectus instead counts two normal trading days of the underlying, subject to a 20-exchange-day exception.",
             applications=("Assume immediate confirmation once full PCF consideration is available before cutoff. Domestic physical redemption stocks sell in the t+1 application minute when tradable; cross-market proxies use the first tradable minute through the deadline. " + creation_exit_policy if settings.market_split_execution else "Assume successful immediate confirmation once the full PCF consideration is available before cutoff; received assets may sell on a later minute"),
@@ -136,8 +144,8 @@ def make_full_runner(config, *, rules=None):
                 "Market-split research policy: cross-market creation BUY / redemption SELL proxies retry every minute from actual application through pricing-deadline 15:00 inclusive, filling at the first permitted exact close. The manager clock is 09:30-11:30 and 13:00-15:00 inclusive. Unfilled quantities use the exact deadline close for valuation. "
                 f"{executor.etf_symbol[-2:]} optional creation replacements always wait for the scheduled attempt. Unsellable physical redemption stocks retain holdings and retry on later permitted minutes. "
                 if settings.market_split_execution else "Legacy research policy: all cash-substitution proxies wait for the scheduled attempt. "
-            ) + f"Scheduled attempt: application + {settings.cash_substitution_pricing_days} supplied trading days at {settings.cash_substitution_attempt_time}, with the configured quantity cap. Final substitution cash is confirmed on the original pricing deadline; earlier filled quantities keep their execution prices and fees. Pricing and cash receipt remain separate.",
-            substitution_pricing=f"Ordinary research case: at most {settings.cash_substitution_pricing_days} supplied trading days after application; unfilled proxy quantities valued only at the exact deadline-day 15:00 close. This is valuation, not an investor fill. Missing deadline close leaves pricing unresolved. Individual suspended-day extensions, corporate actions and the 20-day special case require additional historical inputs.",
+            ) + f"Scheduled attempt: on the applicable pricing deadline at {settings.cash_substitution_attempt_time}, with the configured quantity cap. Final substitution cash is confirmed on the applicable pricing deadline; earlier filled quantities keep their execution prices and fees. Pricing and cash receipt remain separate.",
+            substitution_pricing=pricing_note,
             substitution_payment="Pricing, notice and payment are separate. Explicit business calendar determines notice/bound dates; only a supplied payment timestamp credits cash. Missing payment date stays unpaid. An explicitly configured non-null cash_substitution_lag is a research override, not a prospectus payment guarantee.",
             cash_difference="Actual cash uses SZ CashComponent or SH PreCashComponent matched via PreTradingDay. Signed-estimate mode requires the next trading day's PCF. Default payment requires a supplied timestamp; a non-null cash_difference_lag is an explicit research override.",
             scheduling=f"Overlapping cycles are allowed, including unpaid cash settlements. A new signal may open a cycle after {settings.min_trade_interval_minutes} elapsed minutes from the latest actual creation/redemption submission (applied_at), subject to cash, basket and trading-session checks. A not-yet-submitted entry waits for its application timestamp before the clock starts. Daily cap={settings.max_trades_per_day} (None means no daily cap). CREATE and REDEEM share the quota; stock orders do not consume it. No intraday reset; lunch counts as elapsed time.",
@@ -155,10 +163,12 @@ def make_full_runner(config, *, rules=None):
         _csv(output / "fees.csv", executor.fee_rows,
              ["ts", "trade_id", "order_id", "symbol", "side", "purpose", "turnover", "commission", "stamp_duty", "transfer_fee", "handling_fee", "total", "charged_to"])
         _csv(output / "creation_substitutions.csv", executor.creation_substitutions,
-             ["ts", "trade_id", "symbol", "quantity", "price", "premium_rate", "deposit", "reason", "basis"])
-        _csv(output / "orders.csv", [asdict(o) | {"remaining": o.remaining, "last_sh_attempted_at": o.last_sh_attempted_at}
+             ["ts", "trade_id", "symbol", "quantity", "price", "premium_rate", "deposit", "reason", "basis", "observed_price", "observation_stage"])
+        _csv(output / "orders.csv", [asdict(o) | {"remaining": o.remaining, "last_sh_attempted_at": o.last_sh_attempted_at,
+                                      "deadline_valuation_price": o.deadline_valuation_price}
                                      for o in executor.orders],
-             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "fee", "cancelled", "paused", "manager_attempted_at", "next_minute_attempted_at", "last_sh_attempted_at", "last_cross_market_attempted_at", "last_block"])
+             ["order_id", "trade_id", "symbol", "side", "quantity", "submitted", "purpose", "not_before_day", "filled", "remaining", "value", "fee", "cancelled", "paused", "manager_attempted_at", "next_minute_attempted_at", "last_sh_attempted_at", "last_cross_market_attempted_at", "last_block",
+              "pricing_deadline", "deadline_basis", "attempt_scheduled_at", "pricing_close_at", "deadline_valuation_price"])
         _csv(output / "fills.csv", executor.fills,
              ["ts", "order_id", "trade_id", "symbol", "side", "quantity", "price", "purpose", "fee", "commission", "stamp_duty", "transfer_fee", "handling_fee", "slippage", "basis"])
         _csv(output / "cashflows.csv", account.rows,
@@ -166,7 +176,7 @@ def make_full_runner(config, *, rules=None):
         _csv(output / "cash_settlements.csv", [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs],
              ["trade_id", "kind", "estimate", "final", "known_on", "pricing_deadline", "attempt_scheduled_at", "priced_at", "notice_due_on", "latest_payment_on", "due", "payment_at", "paid_at", "paid", "pricing_basis", "payment_basis", "actual_component"])
         _csv(output / "substitution_pricing.csv", executor.substitution_pricing,
-             ["trade_id", "symbol", "quantity", "price", "ts", "basis"])
+             ["trade_id", "symbol", "quantity", "price", "ts", "basis", "source_ts"])
         _csv(output / "redemption_sell_blocks.csv", executor.redemption_sell_blocks,
              ["ts", "trade_id", "order_id", "symbol", "side", "purpose", "unfilled_quantity", "close", "reason"])
         _csv(output / "substitution_attempts.csv", executor.substitution_attempts,
@@ -201,7 +211,7 @@ def make_full_runner(config, *, rules=None):
         settlement_rows = [dict(trade_id=t.trade_id, **asdict(leg)) for t in executor.trades for leg in t.legs]
         limit_impact = build_limit_impact(config, trade_rows, source.rows, executor.fills,
             executor.fee_rows, executor.substitution_pricing, executor.creation_substitutions,
-            settlement_rows, executor.substitution_attempts, rules=resources.rules)
+            settlement_rows, executor.substitution_attempts, orders=(vars(o) for o in executor.orders), rules=resources.rules)
         save_limit_impact(output, limit_impact)
         signal_risk = build_signal_risk(config, trade_rows, source.rows, rules=resources.rules)
         save_signal_risk(output, signal_risk)

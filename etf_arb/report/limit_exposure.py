@@ -99,10 +99,17 @@ def planned_execution_limit_exposure(data, config, trades, orders, fills, pricin
     order from saved records; neither signal nor first-block prices may silently
     replace a missing exact planned-minute price. This never changes cash.
     """
-    if data.get('pnl_basis') == PLANNED_EXECUTION_BASIS:
-        return price_only_limit_exposure(data)
-    by_trade = {r['trade_id']: r for r in trades}
     by_order = {r['order_id']: r for r in orders}
+    if data.get('pnl_basis') == PLANNED_EXECUTION_BASIS:
+        # An intermediate cache may contain a basket-level 14:30 timestamp.
+        # Rebuild it only if the recorded order carries a different schedule.
+        stale = any(row.get('planned_timing_basis') == 'configured_legacy_manager_attempt'
+                    and 'attempt_scheduled_at' in by_order.get(row['order_id'], {})
+                    and str(by_order[row['order_id']]['attempt_scheduled_at'] or '') != str(row.get('planned_at') or '')
+                    for row in data['rows'])
+        if not stale:
+            return price_only_limit_exposure(data)
+    by_trade = {r['trade_id']: r for r in trades}
     legs = {r['trade_id']: r for r in settlements if r['kind'] == 'cash_substitution'}
     settings = _setting(config, 'simulation', {})
     one_minute = _setting(settings, 'one_minute_execution')
@@ -130,7 +137,7 @@ def planned_execution_limit_exposure(data, config, trades, orders, fills, pricin
                 at = opened if signal_entry else next_investor_minute(opened)
             basis = 'original_domestic_creation_buy_before_cash_substitution'
         elif order['purpose'] == 'MANAGER' and not split:
-            raw = legs.get(row['trade_id'], {}).get('attempt_scheduled_at')
+            raw = order.get('attempt_scheduled_at', legs.get(row['trade_id'], {}).get('attempt_scheduled_at'))
             at = timestamp(raw) if raw else None
             basis = 'configured_legacy_manager_attempt'
         else:
@@ -161,7 +168,7 @@ def planned_execution_limit_exposure(data, config, trades, orders, fills, pricin
             references[key] = at, price, source
 
     for row in substitutions:
-        remember((row['trade_id'], row['symbol']), row.get('ts'), row.get('price'),
+        remember((row['trade_id'], row['symbol']), row.get('ts'), row.get('observed_price', row.get('price')),
                  'saved_creation_substitution_signal_price')
     for row in stock_rows:
         remember((row['trade_id'], row['symbol']), row.get('signal_price_at'),
@@ -284,7 +291,7 @@ def _initial_substitution_blocks(config, trades, orders, substitutions, rules, *
         reason = limits.status(row['symbol'], next_at)
         if not reason or not reason.startswith('limit_up:'):
             continue
-        observations = [(at, row['price'], row['reason'])]
+        observations = [(at, row.get('observed_price', row['price']), row['reason'])]
         if include_followup:
             observations.append((next_at, prices.get(row['symbol'], next_at).close, reason))
         for when, price, cause in observations:

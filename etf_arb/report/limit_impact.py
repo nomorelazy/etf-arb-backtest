@@ -36,6 +36,7 @@ ROUTES = {"manager": "现金代买卖", "physical": "实物交割", "fixed": "�
 METHODS = {"manager_scheduled_close_proxy": "本市场定时补券成交",
            "manager_next_minute_close_proxy": "跨市场首个可成交分钟",
            "manager_first_tradable_close_proxy": "跨市场首个可成交分钟",
+           "unfilled_quantity_at_last_actual_close": "未成交部分按最近一次实际收盘价估值",
            "unfilled_quantity_at_deadline_close": "未成交部分按期限收盘估值",
            "signal_minute_close": "信号分钟实物买入", "next_minute_close": "实物成交",
            "fixed_pcf_amount": "PCF固定金额", "unwind": "申赎未提交后的实际平仓"}
@@ -154,7 +155,7 @@ def _stock_pnl(trade, component, plan, symbol, signal_price, fills, fees, pricin
     priced_value = sum((decimal(r["price"]) * int(r["quantity"]) for r in values), ZERO)
     methods = {r.get("basis") or "actual_fill" for r in selected}
     if valued:
-        methods.add("unfilled_quantity_at_deadline_close")
+        methods.update(r.get("basis") or "unfilled_quantity_at_deadline_close" for r in values)
     result.update(pricing_method=";".join(sorted(methods)),
         execution_price=fill_value / filled if filled else None,
         valuation_price=priced_value / valued if valued else None,
@@ -174,8 +175,24 @@ def _stock_pnl(trade, component, plan, symbol, signal_price, fills, fees, pricin
     return result
 
 
+def apply_order_pricing_deadlines(data, orders):
+    """Use the individual manager order when recorded; retain the old basket date for legacy orders."""
+    selected = {}
+    for stock in data.get("rows", ()):
+        if stock.get("route") == "manager":
+            selected[stock["trade_id"], stock["symbol"]] = stock
+        elif "route" in stock:
+            stock["pricing_deadline"] = None
+    for order in orders:
+        if order.get("purpose") == "MANAGER" and "pricing_deadline" in order:
+            stock = selected.get((order["trade_id"], order["symbol"]))
+            if stock is not None:
+                stock["pricing_deadline"] = order["pricing_deadline"] or None
+    return data
+
+
 def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), substitutions=(),
-                       settlements=(), attempts=(), *, rules=None, application_blocks=()):
+                       settlements=(), attempts=(), *, rules=None, application_blocks=(), orders=()):
     """Build only after execution, for both fresh runs and saved-run rebuilds."""
     def setting(name, default=None):
         return config.get(name, default) if isinstance(config, dict) else getattr(config, name, default)
@@ -282,6 +299,7 @@ def build_limit_impact(config, trades, signals, fills, fees, pricing_rows=(), su
         row.update(_stock_pnl(trade, component, plan, symbol, signal_price,
             fill_map[tid, symbol], fee_map[tid, symbol], pricing_map[tid, symbol]))
         data["rows"].append(row)
+    apply_order_pricing_deadlines(data, orders)
     for trade in trades:
         tid = trade["trade_id"]
         symbols = sorted(symbol for trade_id, symbol in hits if trade_id == tid)

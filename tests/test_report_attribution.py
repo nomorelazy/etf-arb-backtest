@@ -115,6 +115,7 @@ class ReportAttributionTests(unittest.TestCase):
             self.assert_reconciled(row)
 
     def test_optional_sz_substitution_and_partial_deadline_valuation(self):
+        self.fixture.write_prior_closes()
         self.fixture.rules.add(SecurityTradingRule('000001.SZ', fixtures.DAYS[0], fixtures.DAYS[-1],
                                                    True, True, trading_start=time(9, 31)))
         scheduled = datetime.combine(fixtures.DAYS[2], time(14, 30))

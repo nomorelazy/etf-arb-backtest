@@ -238,10 +238,14 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                     f"<p>本轮门槛：申购溢价严格大于 {Decimal(creation_threshold):.4%}；"
                     f"赎回折价幅度严格大于 {Decimal(redemption_threshold):.4%}。"
                     "close 简化成交；定价完成与现金到账分别记录，待交收不计作最终结清。</p>")
-        if financial_summary.get('etf_code') == '159338':
+        if financial_summary.get('substitution_pricing_note'):
+            details += f"<p>{escape(financial_summary['substitution_pricing_note'])}</p>"
+        elif financial_summary.get('etf_code') == '159338':
             details += ("<p>159338 本回测按配置的交易所交易日历确定现金替代定价期限。"
                         "国泰招募说明书对允许替代按个股正常交易日计算，另设 20 个交易日特例。"
                         "长时间停牌时，模拟定价日和退补金额可能与基金实务不同。</p>")
+        if financial_summary.get("optional_creation_deposit_note"):
+            details += f"<p>{escape(financial_summary['optional_creation_deposit_note'])}</p>"
         if financial_summary.get('frequency_anchor') == 'application_submitted_at':
             details += (f"<p>交易节奏：以上一笔实际提交申赎时间起算，满 {financial_summary['min_trade_interval_minutes']} 分钟后，"
                         "有合格信号且可用现金足够即可发起下一笔，允许多笔未结清套利并行。"
@@ -256,13 +260,13 @@ def _save_html(summary: BacktestSummary, path: Path, chart_name: str, *, trade_r
                             + "缺精确卖价或不允许卖出时保留持仓，按后续实际成交记录，不伪造 t+1 成交。</p>")
             listed_in_sh = str(financial_summary.get('etf_code', '159338')).startswith('5')
             domestic_market, proxy_market = ('沪市', '深市') if listed_in_sh else ('深市', '沪市')
-            details += (f"<p>沪深代买卖时点分离：{proxy_market}跨市场申购代买、赎回代卖，从实际提交申赎起至 T+2 日 15:00（含），"
+            details += (f"<p>沪深代买卖时点分离：{proxy_market}跨市场申购代买、赎回代卖，从实际提交申赎起至各股票定价期限 15:00（含），"
                         "在首个可成交分钟使用精确 close 足额定价；期间逐分钟检查，含收盘最后一分钟。"
-                        "整个窗口仍未成交的数量按 T+2 日精确收盘价估值，不伪造成交或收取成交税费。"
+                        "整个窗口仍未成交的数量按本轮期限规则估值，不伪造成交或收取成交税费。"
                         + (f"赎回买入 ETF 使用信号 t 价格，正常可交易{domestic_market}实物股票在 t+1 申请分钟卖出。"
                            if financial_summary.get('entry_at_signal_time') else
                            f"赎回买入 ETF 及卖出正常可交易{domestic_market}实物股票使用信号后 t+1 分钟价格。") +
-                        f"{domestic_market}可选申购现金替代补券按配置的后续时点尝试，默认 T+2 日 14:30。"
+                        f"{domestic_market}可选申购现金替代补券按配置的后续时点尝试，默认在各股定价日 14:30。"
                         f"{domestic_market}无法卖出的实物股票继续持有并等待后续可交易分钟。"
                         "成交、现金替代最终金额确认和实际到账分别记录。</p>"
                         f"<p>赎回全部股票已在 t+1 锁价：{financial_summary.get('redemption_price_locked_count', 0)} 笔；"

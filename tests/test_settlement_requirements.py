@@ -137,6 +137,7 @@ class RequirementsIntegrationTests(unittest.TestCase):
 
     def test_supplied_trading_restriction_blocks_1430_but_allows_close_valuation(self):
         day = fixtures.DAYS[-1]
+        self.fixture.rules.add(SecurityTradingRule('600000.SH',fixtures.DAYS[0],fixtures.DAYS[1],True,True))
         self.fixture.rules.add(SecurityTradingRule('600000.SH',day,day,False,False))
         rows = [(ts,symbol,5 if symbol=='600000.SH' and ts==datetime.combine(day,time(15)) else price)
                 for ts,symbol,price in self.fixture.market_rows()]

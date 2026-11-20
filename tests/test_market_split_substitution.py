@@ -36,6 +36,7 @@ class MarketSplitSubstitutionTests(unittest.TestCase):
         return self.fixture.run_model(self.rows() if rows is None else rows, config or self.config)
 
     def require_sz_replacement(self):
+        self.fixture.write_prior_closes()
         # Blocked only at signal time: already tradable at t+1, still must wait T+2.
         self.fixture.rules.add(SecurityTradingRule(
             '000001.SZ', fixtures.DAYS[0], fixtures.DAYS[-1], True, True, trading_start=time(9, 31)))

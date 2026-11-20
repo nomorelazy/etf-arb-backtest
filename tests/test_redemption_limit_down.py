@@ -62,16 +62,16 @@ class RedemptionLimitDownTests(unittest.TestCase):
         rows = self.fixture.market_rows(3.2, 3.1)
         runner, summary = self.run_model(rows, config)
         sim = runner.executor
-        self.assertEqual(summary["settled_count"], 1)
+        self.assertEqual(summary["pending_count"], 1)
         local, = [r for r in sim.fills if r["symbol"] == "000001.SZ"]
         self.assertEqual((local["ts"], local["side"]), (datetime.combine(reopened, time(9, 30)), "SELL"))
         self.assertEqual(local["basis"], "first_tradable_close_after_suspension")
         self.assertFalse([r for r in sim.fills if r["symbol"] == "600000.SH"])
         self.assertFalse([r for r in sim.fee_rows if r["symbol"] == "600000.SH"])
         self.assertEqual(sim.daily[0]["holdings_value"], Decimal("100"))
-        mark, = sim.substitution_pricing
-        self.assertEqual((mark["symbol"], mark["ts"], mark["quantity"]),
-                         ("600000.SH", datetime.combine(deadline, time(15)), 100))
+        self.assertFalse(sim.substitution_pricing)
+        self.assertIsNone(sim.trades[0].legs[1].final)
+        self.assertIsNone(sim.trades[0].legs[1].paid_at)
 
     def test_resumed_proxy_waits_through_unknown_and_one_sided_limit_prices(self):
         day, resumed, _ = fixtures.DAYS

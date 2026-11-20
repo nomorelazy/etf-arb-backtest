@@ -209,6 +209,7 @@ class SignalTimeEntryTests(unittest.TestCase):
         self.assertFalse(runner.executor.account.rows)
 
     def test_cash_substituted_sz_still_waits_until_t_plus_two_1430(self):
+        self.fixture.write_prior_closes()
         self.fixture.rules.add(SecurityTradingRule('000001.SZ', fixtures.DAYS[0], fixtures.DAYS[-1],
                                                    True, True, trading_start=time(9, 31)))
         runner, _ = self.run_model()
