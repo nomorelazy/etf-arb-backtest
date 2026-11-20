@@ -73,6 +73,19 @@ class RedemptionLimitDownTests(unittest.TestCase):
         self.assertEqual((mark["symbol"], mark["ts"], mark["quantity"]),
                          ("600000.SH", datetime.combine(deadline, time(15)), 100))
 
+    def test_resumed_proxy_waits_through_unknown_and_one_sided_limit_prices(self):
+        day, resumed, _ = fixtures.DAYS
+        feed = self.fixture.market / "stock_suspensions.csv"
+        feed.write_text(f"symbol,start_date,end_date,source_url\n"
+                        f"600000.SH,{day},{day},https://source.example/sh\n")
+        config = self.bounds([(resumed, '600000.SH', '2.20', '1.80', 0)])
+        rows = [(at, code, {time(9, 30): 2.30, time(9, 31): 2.20}.get(at.time(), 2)
+                 if code == "600000.SH" and at.date() == resumed else price)
+                for at, code, price in self.fixture.market_rows()]
+        runner, _ = self.run_model(rows, config)
+        fill, = [row for row in runner.executor.fills if row["symbol"] == "600000.SH"]
+        self.assertEqual((fill["side"], fill["ts"]), ("BUY", datetime.combine(resumed, time(9, 32))))
+
     def test_existing_dated_suspension_rule_also_retries_on_first_stock_minute(self):
         day, resumed, end = fixtures.DAYS
         self.fixture.rules.add(SecurityTradingRule("000001.SZ", day, day, False, False, is_suspended=True))

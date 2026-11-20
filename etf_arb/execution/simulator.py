@@ -306,7 +306,7 @@ class ArbitrageSimulator:
                     self._queue_physical_sale(order, trade, context)
                 elif order.purpose == "MANAGER" and self._cross_market_proxy(order.symbol):
                     order.last_cross_market_attempted_at = context.now
-            if block and block.startswith("limit_up:"):
+            if block and (block == "stock_suspended" or block.startswith("limit_up:")):
                 order.awaiting_limit_release = True
             return
         if trade.decision.side is Side.REDEEM and order.side == "SELL":
