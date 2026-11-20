@@ -100,7 +100,10 @@ def make_full_runner(config, *, rules=None):
             fill_policy = ("Entry BUY uses signal t exact close; later application and exits retain their configured timing."
                            if settings.entry_at_signal_time else "first strictly later permitted trading minute with an exact valid close")
         assumptions = dict(
-            redemption_stock_sales="At a known lower-limit minute close, retain physical holdings or defer the cross-market proxy sale. Unfilled proxy quantities use the deadline valuation policy.",
+            redemption_stock_sales=("After a lower-limit block, both physical and cross-market redemption sales retry "
+                                    "each stock trading minute independently of signal scans and entry windows. "
+                                    "An unlocked, tradable stock sells at its exact minute close. Unfilled proxy "
+                                    "quantities use the deadline valuation policy."),
             model=f"{etf_code} research simulation: domestic physical basket and cross-market cash substitution",
             market_split_execution=settings.market_split_execution,
             entry_at_signal_time=settings.entry_at_signal_time,

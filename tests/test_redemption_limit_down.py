@@ -97,6 +97,35 @@ class RedemptionLimitDownTests(unittest.TestCase):
                                  '600000.SH': (self.entry, Decimal('2.20'))})
         self.assertFalse(runner.executor.redemption_sell_blocks)
 
+    def test_blocked_sales_follow_stock_minutes_between_scans_and_overnight(self):
+        first, second, _ = fixtures.DAYS
+        limits = {'000001.SZ': ('.90', '1.10'), '600000.SH': ('1.80', '2.20')}
+        config = self.bounds([(day, symbol, upper, lower, 0) for day in fixtures.DAYS
+                              for symbol, (lower, upper) in limits.items()])
+        clocks = (time(11, 28), time(11, 29), time(13, 5), time(14, 30), time(15))
+        execution = replace(config.simulation, trading_sessions=(('09:35', '11:29'), ('13:03', '14:57')))
+        config = replace(config, clock_times=clocks, simulation=execution)
+        blocked = datetime.combine(first, time(11, 29))
+        for day, opening in [(first, time(13)), (second, time(9, 30))]:
+            with self.subTest(opening=opening):
+                local = datetime.combine(day, opening)
+                proxy = local + timedelta(minutes=1)
+                unlocks = {'000001.SZ': local, '600000.SH': proxy}
+                moments = {datetime.combine(d, t) for d in fixtures.DAYS for t in clocks}
+                noon = datetime.combine(first, time(12, 59))
+                moments.update([noon, local, proxy])
+                rows = []
+                for at in sorted(moments):
+                    rows.append((at, '159338.SZ', 3.2))
+                    for symbol, unlock in unlocks.items():
+                        down = float(limits[symbol][0])
+                        price = down if blocked <= at < unlock and at != noon else down + .10
+                        rows.append((at, symbol, price))
+                runner, _ = self.run_model(rows, replace(config, output_dir=self.fixture.root / str(day)))
+                sells = [(r['symbol'], r['ts']) for r in runner.executor.fills if r['side'] == 'SELL']
+                self.assertCountEqual(sells, list(unlocks.items()))
+                self.assertFalse(any(event.ts in (local, proxy) and event.kind == 'CLOCK' for event in runner._events))
+
     def test_missing_deadline_bar_keeps_only_its_own_proxy_unpriced(self):
         stocks = ('600000.SH', '600100.SH')
         config = self.bounds([(day, symbol, '2.20', '1.80', 0)

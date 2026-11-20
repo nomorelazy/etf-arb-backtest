@@ -20,7 +20,7 @@ from etf_arb.report.attribution import signal_reference
 from etf_arb.rules import TradeFrequencyRule, TradingTimeRule
 from etf_arb.rules.tradability import security_trade_block
 from etf_arb.rules.price_limit_bounds import StockPriceLimits
-from etf_arb.rules.cash_substitution import CashSubstitutionTiming
+from etf_arb.rules.cash_substitution import CashSubstitutionTiming, next_stock_execution_minute
 from etf_arb.settlement.cash import CashLeg, trading_day_after, load_payment_dates
 
 
@@ -90,6 +90,7 @@ class ArbitrageSimulator:
         self.substitution_pricing = []
         self.substitution_attempts = []
         self.redemption_sell_blocks = []
+        self._physical_retries = {}
         self.creation_substitutions = []
         self.fee_rows = []
         self.peak_open_cycles = 0
@@ -157,14 +158,15 @@ class ArbitrageSimulator:
                         require_next_trading_day=self.settings.settle_estimated_cash_at_application,
                     )
 
-    def _can_trade(self, order, context, *, application_minute=False, proxy_window=False):
+    def _can_trade(self, order, context, *, application_minute=False, exchange_window=False):
         now = context.now
         if (now < order.submitted or (now == order.submitted and not application_minute)
                 or now.date() < order.not_before_day):
             return "waiting_for_later_bar_or_sell_availability"
-        if proxy_window:
+        if exchange_window:
             if not self.cash_timing.allows_sh_attempt(now):
-                return f"outside_{self.proxy_market.lower()}_proxy_minutes"
+                return (f"outside_{self.proxy_market.lower()}_proxy_minutes" if order.purpose == "MANAGER"
+                        else "outside_stock_execution_minutes")
         elif self.trading_times.is_blocked(now.time()):
             return "blocked_trade_minute"
         elif not self.trading_times.allows(now.time()):
@@ -246,9 +248,12 @@ class ArbitrageSimulator:
             self._fill_full_basket(trade, context)
         # Application remains on a later bar, including all-cash creation.
 
-    def _fill(self, order, trade, context, *, next_minute=False, proxy_window=False, at_signal=False):
+    def _fill(self, order, trade, context, *, next_minute=False, proxy_window=False, at_signal=False,
+              physical_retry=False):
         if not order.remaining or order.paused:
             return
+        if not physical_retry and order.order_id in self._physical_retries:
+            return  # Only the minute callback may consume this order's capacity.
         if at_signal and (not self.settings.entry_at_signal_time or order.purpose != "ENTRY"
                           or order.side != "BUY" or context.now != trade.decision.ts):
             raise ValueError("Signal-time fills require a configured entry BUY at the signal timestamp")
@@ -285,7 +290,7 @@ class ArbitrageSimulator:
                 # Scheduled callback and regular clock may share a timestamp.
                 order.manager_attempted_at = context.now
         block = self._can_trade(order, context, application_minute=next_minute or proxy_window or at_signal,
-                                proxy_window=proxy_window)
+                                exchange_window=proxy_window or physical_retry)
         bar = self.prices.get(order.symbol, context.now, exact=True)
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
@@ -300,11 +305,15 @@ class ArbitrageSimulator:
                     unfilled_quantity=order.remaining, close=bar.close, reason=status))
                 if order.purpose == "MANAGER" and self._cross_market_proxy(order.symbol):
                     order.last_cross_market_attempted_at = context.now
+                elif order.purpose == "EXIT" and not physical_retry:
+                    start_clock = not self._physical_retries
+                    self._physical_retries[order.order_id] = (order, trade)
+                    if start_clock:
+                        self._schedule_physical_retries(context)
                 return
             if order.awaiting_limit_release and status and status.startswith("unknown:"):
                 order.last_block = status
                 return
-            order.awaiting_limit_release = False
         quantity = order.remaining
         cap = self.settings.max_shares_per_minute
         uncapped_minute = next_minute or (proxy_window and self.settings.market_split_execution)
@@ -337,6 +346,8 @@ class ArbitrageSimulator:
         if order.purpose != "MANAGER":
             self.account.fill(context.now, trade.trade_id, order.symbol, order.side, quantity, bar.close, fees=fees)
         order.filled += quantity
+        if not order.remaining:
+            order.awaiting_limit_release = False
         order.value += quantity * bar.close
         order.fee += fees.total
         order.last_block = ""
@@ -485,6 +496,20 @@ class ArbitrageSimulator:
 
     def _cross_market_proxy(self, symbol):
         return symbol.endswith(f".{self.proxy_market}")
+
+    def _schedule_physical_retries(self, context):
+        when = next_stock_execution_minute(context.now, context.resources.config.trading_days)
+        if when is not None:
+            context.schedule(when, self._retry_physical_sales, "redemption.retry_physical_sales")
+
+    def _retry_physical_sales(self, context):
+        for order, trade in tuple(self._physical_retries.values()):
+            self._fill(order, trade, context, physical_retry=True)
+            if not order.remaining or order.paused:
+                del self._physical_retries[order.order_id]
+                self._close_if_done(trade, context)
+        if self._physical_retries:
+            self._schedule_physical_retries(context)
 
     def _uses_proxy_window(self, order):
         # In scheduled mode, only switch to minute retries after a blocked cross-market sale.
