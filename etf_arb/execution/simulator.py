@@ -19,6 +19,7 @@ from etf_arb.report.models import EquityPoint
 from etf_arb.report.attribution import signal_reference
 from etf_arb.rules import TradeFrequencyRule, TradingTimeRule
 from etf_arb.rules.tradability import security_trade_block
+from etf_arb.rules.price_limit_bounds import StockPriceLimits
 from etf_arb.rules.cash_substitution import CashSubstitutionTiming
 from etf_arb.settlement.cash import CashLeg, trading_day_after, load_payment_dates
 
@@ -42,6 +43,7 @@ class SimOrder:
     manager_attempted_at: datetime | None = None
     next_minute_attempted_at: datetime | None = None
     last_cross_market_attempted_at: datetime | None = None
+    awaiting_limit_release: bool = False
 
     @property
     def last_sh_attempted_at(self):
@@ -86,6 +88,7 @@ class ArbitrageSimulator:
         self.payment_dates = {}
         self.substitution_pricing = []
         self.substitution_attempts = []
+        self.redemption_sell_blocks = []
         self.creation_substitutions = []
         self.fee_rows = []
         self.peak_open_cycles = 0
@@ -117,7 +120,9 @@ class ArbitrageSimulator:
 
     def on_day_open(self, context):
         if self.account is None:
-            self.account = CashAccount(context.resources.config.starting_cash, context.resources.portfolio)
+            config = context.resources.config
+            self.redemption_limits = StockPriceLimits(self.prices, config.minute_root, config.daily_price_limits_path)
+            self.account = CashAccount(config.starting_cash, context.resources.portfolio)
             self.payment_dates = load_payment_dates(context.resources.config.cash_payment_dates_path)
             from datetime import timedelta
             self.equity_curve.append(EquityPoint(context.now.date() - timedelta(days=1), self.account.cash))
@@ -129,6 +134,18 @@ class ArbitrageSimulator:
                 symbols.add(order.symbol)
         symbols.update(symbol for (_, symbol), q in self.account.positions.items() if q)
         self.prices.load(context.now.date(), symbols)
+        # A pending sell can outlive its original PCF, including past the signal horizon.
+        held_components = []
+        for trade in self.trades:
+            if trade.decision.side is Side.REDEEM and trade.state == "APPLIED":
+                pending = {o.symbol for o in self._orders(trade) if o.remaining and o.side == "SELL"}
+                if pending:
+                    held_components.extend(c for c in trade.pcf.components
+                                           if not c.is_cash_placeholder and component_symbol(c) in pending)
+        pcf, = context.pcfs.values()
+        self.redemption_limits.on_day_open(pcf, context.resources.rules,
+                                          check_basket=context.now.date() <= context.resources.config.end_date,
+                                          held_components=held_components)
         for trade in self.trades:
             if trade.applied_at:
                 for leg in trade.legs:
@@ -246,7 +263,7 @@ class ArbitrageSimulator:
                 raise ValueError("Next-minute fills require a confirmed market-split t+1 application")
         if order.purpose == "MANAGER":
             sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
-            if self.settings.market_split_execution and self._cross_market_proxy(order.symbol):
+            if self._uses_proxy_window(order):
                 if not proxy_window:
                     return
                 if (trade.applied_at is None or context.now < trade.applied_at
@@ -272,9 +289,25 @@ class ArbitrageSimulator:
         if block or bar is None:
             order.last_block = block or "missing_exact_bar"
             return
+        if trade.decision.side is Side.REDEEM and order.side == "SELL":
+            status = self.redemption_limits.status(order.symbol, context.now)
+            if status and status.startswith("limit_down:"):
+                order.awaiting_limit_release = True
+                order.last_block = status
+                self.redemption_sell_blocks.append(dict(ts=context.now, trade_id=trade.trade_id,
+                    order_id=order.order_id, symbol=order.symbol, side=order.side, purpose=order.purpose,
+                    unfilled_quantity=order.remaining, close=bar.close, reason=status))
+                if order.purpose == "MANAGER" and self._cross_market_proxy(order.symbol):
+                    order.last_cross_market_attempted_at = context.now
+                return
+            if order.awaiting_limit_release and status and status.startswith("unknown:"):
+                order.last_block = status
+                return
+            order.awaiting_limit_release = False
         quantity = order.remaining
         cap = self.settings.max_shares_per_minute
-        if cap is not None and not (next_minute or proxy_window) and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
+        uncapped_minute = next_minute or (proxy_window and self.settings.market_split_execution)
+        if cap is not None and not uncapped_minute and (order.purpose == "MANAGER" or not self.settings.assume_full_basket_fill):
             quantity = min(quantity, cap)
         if order.purpose != "MANAGER":
             if order.side == "BUY":
@@ -452,6 +485,11 @@ class ArbitrageSimulator:
     def _cross_market_proxy(self, symbol):
         return symbol.endswith(f".{self.proxy_market}")
 
+    def _uses_proxy_window(self, order):
+        # In scheduled mode, only switch to minute retries after a blocked cross-market sale.
+        return self._cross_market_proxy(order.symbol) and (
+            self.settings.market_split_execution or order.last_cross_market_attempted_at is not None)
+
     def _attempt_substitution(self, trade, context):
         for order in self._orders(trade, "MANAGER"):
             if not order.remaining or order.paused:
@@ -470,13 +508,15 @@ class ArbitrageSimulator:
                 reason=order.last_block or ("quantity_cap" if filled < requested else ""),
                 timing="scheduled_substitution"))
         self._settle(trade, context)
+        if not self.settings.market_split_execution and trade.decision.side is Side.REDEEM:
+            self._attempt_cross_market_substitution(trade, context)
 
     def _attempt_cross_market_substitution(self, trade, context, *, schedule_next=True):
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
         if sub.final is not None or trade.state != "APPLIED":
             return
         for order in self._orders(trade, "MANAGER"):
-            if (not self._cross_market_proxy(order.symbol) or not order.remaining or order.paused
+            if (not self._uses_proxy_window(order) or not order.remaining or order.paused
                     or order.last_cross_market_attempted_at == context.now):
                 continue
             requested, before = order.remaining, order.filled
@@ -485,11 +525,12 @@ class ArbitrageSimulator:
             self.substitution_attempts.append(dict(trade_id=trade.trade_id, order_id=order.order_id,
                 symbol=order.symbol, ts=context.now, side=order.side, requested_quantity=requested,
                 filled_quantity=filled, unfilled_quantity=order.remaining,
-                result="FILLED" if filled == requested else "NO_FILL", reason=order.last_block,
+                result="FILLED" if filled == requested else "PARTIAL" if filled else "NO_FILL",
+                reason=order.last_block or ("quantity_cap" if filled < requested else ""),
                 timing=(f"{self.proxy_market.lower()}_next_minute" if context.now == trade.applied_at
                         else f"{self.proxy_market.lower()}_first_tradable_window")))
         self._settle(trade, context)
-        pending = any(self._cross_market_proxy(o.symbol) and o.remaining and not o.paused
+        pending = any(self._uses_proxy_window(o) and o.remaining and not o.paused
                       for o in self._orders(trade, "MANAGER"))
         if schedule_next and pending:
             next_at = self.cash_timing.next_sh_attempt(
@@ -564,7 +605,7 @@ class ArbitrageSimulator:
         sub = next(leg for leg in trade.legs if leg.kind == "cash_substitution")
         if sub.final is not None or sub.pricing_deadline != context.now.date():
             return
-        if self.settings.market_split_execution and context.now.time() == time(15):
+        if context.now.time() == time(15):
             # The deadline callback may precede the queued 15:00 retry. Give
             # that inclusive last minute a chance before valuing unfilled stock.
             self._attempt_cross_market_substitution(trade, context, schedule_next=False)

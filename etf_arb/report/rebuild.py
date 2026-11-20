@@ -96,7 +96,8 @@ def saved_limit_exposure(run_dir, config, trades, fills, fees, pricing, signals,
     return build_from_saved_records(
         config, trades, orders, fills, fees, pricing, signals, **inputs, execution_blocks=blocks,
         attempts=read_rows(run_dir / 'substitution_attempts.csv'),
-        redemption_risks=read_rows(run_dir / 'redemption_price_risks.csv'))
+        redemption_risks=read_rows(run_dir / 'redemption_price_risks.csv'),
+        redemption_sell_blocks=read_rows(run_dir / 'redemption_sell_blocks.csv'))
 
 
 def rebuild_run_report(run_dir, output_dir):

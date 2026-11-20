@@ -1,0 +1,114 @@
+"""Full-runner regression checks for redemption sales at a minute-close lower limit."""
+import csv
+import json
+import unittest
+import xml.etree.ElementTree as ET
+from dataclasses import replace
+from datetime import datetime, time, timedelta
+from decimal import Decimal
+
+import test_full_flow as fixtures
+import test_market_split_substitution as market
+
+
+class RedemptionLimitDownTests(unittest.TestCase):
+    setUp = market.MarketSplitSubstitutionTests.setUp
+    run_model = market.MarketSplitSubstitutionTests.run_model
+
+    def bounds(self, rows):
+        path = self.fixture.root / 'daily_limits.csv'
+        with path.open('w', encoding='utf-8', newline='') as stream:
+            writer = csv.writer(stream)
+            writer.writerow(['date', 'symbol', 'upper_limit', 'lower_limit', 'no_limit'])
+            writer.writerows(rows)
+        return replace(self.config, daily_price_limits_path=path)
+
+    def test_real_holdings_and_cross_market_retry_until_their_own_unlock(self):
+        first_day, next_day, _ = fixtures.DAYS
+        config = self.bounds([(first_day, '000001.SZ', '1.1', '.90', 0),
+                              (first_day, '600000.SH', '2.2', '1.80', 0),
+                              (next_day, '000001.SZ', '1.05', '.85', 0)])
+        unlock = self.entry + timedelta(minutes=2)
+        rows = []
+        for at, symbol, price in self.fixture.market_rows(3.2, 3.1):
+            if symbol == '000001.SZ' and at.date() == first_day and at >= self.entry:
+                price = .90
+            if symbol == '600000.SH' and self.entry <= at < unlock:
+                price = 1.80
+            rows.append((at, symbol, price))
+        runner, summary = self.run_model(rows, config)
+        sim = runner.executor
+        sells = {r['symbol']: r for r in sim.fills if r['side'] == 'SELL'}
+        self.assertEqual(sells['000001.SZ']['ts'], datetime.combine(next_day, time(9, 30)))
+        self.assertEqual(sells['600000.SH']['ts'], unlock)
+        self.assertEqual(sim.daily[0]['holdings_value'], Decimal('90'))
+        self.assertIsNone(sim.trades[0].redemption_prices_locked_at)
+        self.assertEqual(sim.trades[0].delayed_redemption,
+                         {'000001.SZ': 'limit_down:provided', '600000.SH': 'limit_down:provided'})
+        self.assertFalse(sim.substitution_pricing)
+        self.assertEqual(summary['settled_count'], 1)
+        report = json.loads((config.output_dir / 'limit_exposure.json').read_text(encoding='utf-8'))
+        self.assertEqual({r['symbol'] for r in report['rows']}, {'000001.SZ', '600000.SH'})
+        self.assertEqual(len([r for r in sim.fee_rows if r['side'] == 'SELL']), 2)
+
+    def test_unknown_after_block_does_not_release_and_deadline_only_values_proxy(self):
+        day1, day2, day3 = fixtures.DAYS
+        bounds = [(day, '600000.SH', '2.2', '1.8', 0) for day in fixtures.DAYS]
+        bounds += [(day1, '000001.SZ', '1.1', '.9', 0),
+                   (day2, '000001.SZ', '.88', '.80', 0),
+                   (day3, '000001.SZ', '', '', 1)]
+        config = self.bounds(bounds)
+        rows = [(at, symbol, (.9 if symbol == '000001.SZ' else 1.8) if (
+                    at >= self.entry and symbol in {'000001.SZ', '600000.SH'}) else price)
+                for at, symbol, price in self.fixture.market_rows(3.2, 3.1)]
+        # The remaining stock must still have limits even after rotating out of the PCF.
+        for day in (day2, day3):
+            path = self.fixture.pcf / '159338' / (day.strftime('%Y%m%d') + '.xml')
+            root = ET.parse(path).getroot()
+            components = root.find('Components')
+            for component in list(components):
+                if component.findtext('UnderlyingSecurityID') in {'000001', '600000'}:
+                    components.remove(component)
+            ET.ElementTree(root).write(path, encoding='utf-8')
+        runner, _ = self.run_model(rows, config)
+        sim = runner.executor
+        sells = [f for f in sim.fills if f['side'] == 'SELL']
+        self.assertEqual([(f['symbol'], f['ts']) for f in sells],
+                         [('000001.SZ', datetime.combine(day3, time(9, 30)))])
+        self.assertEqual([r['holdings_value'] for r in sim.daily[:2]], [Decimal('90')] * 2)
+        self.assertFalse([r for r in sim.fee_rows if r['purpose'] == 'MANAGER'])
+        self.assertEqual(len(sim.substitution_pricing), 1)
+        mark, = sim.substitution_pricing
+        self.assertEqual((mark['quantity'], mark['price'], mark['ts']),
+                         (100, Decimal('1.8'), datetime.combine(day3, time(15))))
+        self.assertEqual(mark['basis'], 'unfilled_quantity_at_deadline_close')
+        self.assertEqual(sim.substitution_attempts[-1]['result'], 'NO_FILL')
+
+    def test_upper_limit_close_allows_both_redemption_sells(self):
+        day = self.entry.date()
+        config = self.bounds([(day, '000001.SZ', '1.10', '.90', 0),
+                              (day, '600000.SH', '2.20', '1.80', 0)])
+        prices = {'000001.SZ': 1.10, '600000.SH': 2.20}
+        rows = [(at, symbol, prices.get(symbol, price) if at == self.entry else price)
+                for at, symbol, price in self.fixture.market_rows(3.2, 3.1)]
+        runner, _ = self.run_model(rows, config)
+        sells = {f['symbol']: (f['ts'], f['price']) for f in runner.executor.fills if f['side'] == 'SELL'}
+        self.assertEqual(sells, {'000001.SZ': (self.entry, Decimal('1.10')),
+                                 '600000.SH': (self.entry, Decimal('2.20'))})
+        self.assertFalse(runner.executor.redemption_sell_blocks)
+
+    def test_legacy_scheduled_proxy_retries_a_limit_block_before_deadline(self):
+        scheduled = self.scheduled
+        config = self.bounds([(scheduled.date(), '600000.SH', '2.2', '1.80', 0)])
+        config = replace(config, simulation=replace(config.simulation,
+                         market_split_execution=False, max_shares_per_minute=60))
+        rows = [(at, symbol, 1.80 if at == scheduled and symbol == '600000.SH' else price)
+                for at, symbol, price in self.fixture.market_rows(3.2, 3.1)]
+        rows += [(scheduled + timedelta(minutes=1), '600000.SH', 1.90),
+                 (scheduled + timedelta(minutes=2), '600000.SH', 1.95)]
+        runner, _ = self.run_model(rows, config)
+        sim = runner.executor
+        self.assertEqual([(f['ts'], f['quantity']) for f in sim.fills if f['purpose'] == 'MANAGER'],
+                         [(scheduled + timedelta(minutes=1), 60), (scheduled + timedelta(minutes=2), 40)])
+        self.assertFalse(sim.substitution_pricing)
+        self.assertEqual([r['result'] for r in sim.substitution_attempts], ['NO_FILL', 'PARTIAL', 'FILLED'])

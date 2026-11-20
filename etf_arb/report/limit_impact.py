@@ -36,7 +36,7 @@ ROUTES = {"manager": "现金代买卖", "physical": "实物交割", "fixed": "�
 METHODS = {"manager_scheduled_close_proxy": "本市场定时补券成交",
            "manager_next_minute_close_proxy": "跨市场首个可成交分钟",
            "manager_first_tradable_close_proxy": "跨市场首个可成交分钟",
-           "unfilled_quantity_at_deadline_close": "未买入部分按期限收盘估值",
+           "unfilled_quantity_at_deadline_close": "未成交部分按期限收盘估值",
            "signal_minute_close": "信号分钟实物买入", "next_minute_close": "实物成交",
            "fixed_pcf_amount": "PCF固定金额", "unwind": "申赎未提交后的实际平仓"}
 DETAIL_FIELDS = (

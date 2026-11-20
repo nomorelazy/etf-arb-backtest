@@ -100,6 +100,7 @@ def make_full_runner(config, *, rules=None):
             fill_policy = ("Entry BUY uses signal t exact close; later application and exits retain their configured timing."
                            if settings.entry_at_signal_time else "first strictly later permitted trading minute with an exact valid close")
         assumptions = dict(
+            redemption_stock_sales="At a known lower-limit minute close, retain physical holdings or defer the cross-market proxy sale. Unfilled proxy quantities use the deadline valuation policy.",
             model=f"{etf_code} research simulation: domestic physical basket and cross-market cash substitution",
             market_split_execution=settings.market_split_execution,
             entry_at_signal_time=settings.entry_at_signal_time,
@@ -157,6 +158,8 @@ def make_full_runner(config, *, rules=None):
              ["trade_id", "kind", "estimate", "final", "known_on", "pricing_deadline", "attempt_scheduled_at", "priced_at", "notice_due_on", "latest_payment_on", "due", "payment_at", "paid_at", "paid", "pricing_basis", "payment_basis", "actual_component"])
         _csv(output / "substitution_pricing.csv", executor.substitution_pricing,
              ["trade_id", "symbol", "quantity", "price", "ts", "basis"])
+        _csv(output / "redemption_sell_blocks.csv", executor.redemption_sell_blocks,
+             ["ts", "trade_id", "order_id", "symbol", "side", "purpose", "unfilled_quantity", "close", "reason"])
         _csv(output / "substitution_attempts.csv", executor.substitution_attempts,
              ["trade_id", "order_id", "symbol", "ts", "side", "requested_quantity", "filled_quantity", "unfilled_quantity", "result", "reason", "timing"])
         _csv(output / "daily_account.csv", executor.daily,
@@ -202,7 +205,8 @@ def make_full_runner(config, *, rules=None):
             config, trade_rows, [asdict(order) for order in executor.orders], executor.fills,
             executor.fee_rows, executor.substitution_pricing, source.rows,
             substitutions=executor.creation_substitutions, attempts=executor.substitution_attempts,
-            settlements=settlement_rows, stock_rows=limit_impact["rows"], rules=resources.rules)
+            settlements=settlement_rows, redemption_sell_blocks=executor.redemption_sell_blocks,
+            stock_rows=limit_impact["rows"], rules=resources.rules)
         save_limit_exposure(output, limit_exposure)
         save_ledger_report(output / "report/ledger.html", trade_rows, account.rows,
                            executor.fills, settlement_rows, executor.substitution_pricing,

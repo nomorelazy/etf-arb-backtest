@@ -422,7 +422,7 @@ def build_limit_exposure(config, trades, orders, fills, fees, pricing, blocks, s
 
 def build_from_saved_records(config, trades, orders, fills, fees, pricing, signals, *,
                              substitutions=(), attempts=(), settlements=(), execution_blocks=None,
-                             redemption_risks=(), stock_rows=(), rules=None, observed_through=None):
+                             redemption_risks=(), redemption_sell_blocks=(), stock_rows=(), rules=None, observed_through=None):
     """Use the execution log when available, or only surviving dated, directional evidence.
 
     Some versions kept cash-proxy attempts and application-minute reasons but
@@ -460,6 +460,9 @@ def build_from_saved_records(config, trades, orders, fills, fees, pricing, signa
                 else:
                     requests[at].add(order['symbol'])
 
+        for block in redemption_sell_blocks:
+            record(orders_by_id.get(block['order_id']), block['ts'], block['reason'],
+                   block['unfilled_quantity'], block['close'])
         for attempt in attempts:
             unfilled = _quantity(attempt.get('unfilled_quantity') or 0)
             if unfilled:
