@@ -11,6 +11,7 @@ build/
 data/raw/
 data/processed/
 reports/
+configs/generated/
 *.sqlite3
 *.sqlite3-shm
 *.sqlite3-wal

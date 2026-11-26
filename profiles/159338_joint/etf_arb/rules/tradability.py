@@ -1,0 +1,27 @@
+"""Point-in-time security checks shared by signals and simulated orders."""
+
+from etf_arb.rules.errors import RuleNotFoundError
+
+
+def security_trade_block(repo, symbol, at, side, policy):
+    feed = getattr(repo, "suspensions", None)
+    if feed is not None and feed.on(symbol, at.date()):
+        return "stock_suspended"
+    rule = None
+    for code in (symbol, symbol.split(".")[0]):
+        try:
+            rule = repo.get_security_rule(code, at.date())
+            break
+        except RuleNotFoundError:
+            # A gap in supplied history is never permission to assume tradability.
+            if getattr(repo, "security_rules", lambda c: ())(code):
+                return "missing_dated_security_rule"
+    if rule is None:
+        return "missing_security_rule" if policy == "require" else ""
+    if rule.is_suspended:
+        return "stock_suspended"
+    if not rule.is_trading_time(at.time()) or not (
+        rule.can_buy() if side == "BUY" else rule.can_sell()
+    ):
+        return "security_rule_blocked"
+    return ""

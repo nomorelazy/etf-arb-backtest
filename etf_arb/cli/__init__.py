@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import subprocess
+import sys
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -45,9 +47,11 @@ def build_parser() -> argparse.ArgumentParser:
     missing_parser.add_argument("--output", default="reports/missing")
 
     backtest_parser = subparsers.add_parser(
-        "backtest", help="run decision replay or the configured full-flow research simulation"
+        "backtest", help="run the default 159338 joint strategy or a configured simulation",
+        epilog="Without --config, the source checkout runs the 159338 joint launcher. "
+               "Its options include --check-only, --creation-threshold, --redemption-threshold and --direction.",
     )
-    backtest_parser.add_argument("--config", required=True, help="Runner JSON configuration")
+    backtest_parser.add_argument("--config", help="Runner JSON configuration (default: the 159338 joint strategy)")
     backtest_parser.add_argument("--stock-suspensions", type=Path, help="sourced full-day stock suspension intervals")
     backtest_parser.add_argument("--adjusted-reference-prices", type=Path,
                                  help="dated, sourced exchange reference prices for estimating stock limits")
@@ -71,8 +75,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _joint_command(config_path: str | None) -> list[str] | None:
+    """Select the isolated desktop strategy before the legacy config validates its own schema."""
+    root = Path(__file__).resolve().parents[2]
+    if config_path is None:
+        script, arguments = root / "run_backtest.py", []
+    else:
+        from etf_arb.runner_config import read_json
+
+        config = read_json(Path(config_path).expanduser())
+        if not isinstance(config, dict):
+            return None
+        simulation = config.get("simulation")
+        if not (isinstance(simulation, dict) and simulation.get("limit_loss_threshold") is True
+                and config.get("odd_lot_holdings_path") and config.get("odd_lot_reference_prices_path")):
+            return None
+        script, arguments = root / "profiles" / "159338_joint" / "run_cli.py", ["backtest"]
+    if not script.is_file():
+        raise ValueError("The 159338 joint strategy requires the repository source checkout. "
+                         "Run it from the checkout or install it in editable mode.")
+    return [sys.executable, "-X", "utf8", str(script), *arguments]
+
+
 def main() -> int:
-    args = build_parser().parse_args()
+    parser = build_parser()
+    args, extra = parser.parse_known_args()
+    if args.command == "backtest":
+        try:
+            joint = _joint_command(args.config)
+            if joint is not None:
+                # Keep the caller's working directory for relative configs, price files and report paths.
+                return subprocess.run([*joint, *sys.argv[2:]]).returncode
+        except (OSError, ValueError) as error:
+            print(f"Backtest failed: {error}")
+            return 2
+    if extra:
+        parser.error(f"unrecognized arguments: {' '.join(extra)}")
     if args.command == "status":
         print("Core models, PCF parsing, iFinD minute-close storage and basket pricing are available.")
         print("BacktestRunner supports configuration, quality preflight, clock callbacks and decision replay.")

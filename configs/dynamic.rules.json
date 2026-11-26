@@ -1,0 +1,50 @@
+{
+  "etf_rules": [
+    {
+      "etf_code": "159338",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "14:57:00",
+      "redemption_cutoff": "14:57:00"
+    },
+    {
+      "etf_code": "159516",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "15:00:00",
+      "redemption_cutoff": "15:00:00"
+    },
+    {
+      "etf_code": "512760",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "15:00:00",
+      "redemption_cutoff": "15:00:00"
+    },
+    {
+      "etf_code": "512880",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "15:00:00",
+      "redemption_cutoff": "15:00:00"
+    },
+    {
+      "etf_code": "515880",
+      "effective_from": "2025-01-02",
+      "effective_to": "2026-07-22",
+      "creation_enabled": true,
+      "redemption_enabled": true,
+      "creation_cutoff": "15:00:00",
+      "redemption_cutoff": "15:00:00"
+    }
+  ],
+  "security_rules": []
+}
